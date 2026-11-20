@@ -1,0 +1,63 @@
+groups:
+  - name: ledger
+    rules:
+      - alert: LedgerOutboxBacklog
+        expr: ledger_outbox_pending_events > 100
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Outbox backlog is growing"
+          description: "{{ $value }} unpublished outbox events on {{ $labels.instance }}."
+
+      - alert: LedgerOutboxLag
+        expr: ledger_outbox_oldest_event_age_seconds > 60
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Outbox relay is lagging"
+          description: "The oldest unpublished event is {{ $value }} seconds old."
+
+      - alert: LedgerHighErrorRate
+        expr: |
+          sum(rate(ledger_http_requests_total{status=~"5.."}[5m]))
+          /
+          clamp_min(sum(rate(ledger_http_requests_total[5m])), 0.0001)
+          > 0.01
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Ledger API 5xx rate above 1%"
+          description: "5xx ratio is {{ $value | humanizePercentage }}."
+
+      - alert: LedgerP99Latency
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(ledger_http_request_duration_seconds_bucket[5m])) by (le)
+          ) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Ledger p99 latency above 500ms"
+          description: "p99 is {{ $value }} seconds."
+
+      - alert: LedgerReconciliationDiscrepancy
+        expr: sum(ledger_reconciliation_discrepancies) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Ledger reconciliation found a discrepancy"
+          description: "At least one accounting invariant is broken. Run ledgerctl reconcile --repair after investigation."
+
+      - alert: LedgerHighTxRetries
+        expr: rate(ledger_tx_retries_total[5m]) > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High database retry rate"
+          description: "Transaction retries are {{ $value }}/s, suggesting lock contention or deadlocks."

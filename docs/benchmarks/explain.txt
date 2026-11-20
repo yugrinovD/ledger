@@ -1,0 +1,45 @@
+-- statement query
+                                                                         QUERY PLAN
+------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=0.42..11.59 rows=21 width=74) (actual time=0.029..0.097 rows=21 loops=1)
+   Buffers: shared hit=24
+   ->  Index Scan using journal_entries_account_idx on journal_entries  (cost=0.42..5849.98 rows=11000 width=74) (actual time=0.028..0.092 rows=21 loops=1)
+         Index Cond: (account_id = '01a1f7b3-54f4-7ef8-b505-0cf1766e509f'::uuid)
+         Buffers: shared hit=24
+ Planning:
+   Buffers: shared hit=157
+ Planning Time: 1.013 ms
+ Execution Time: 0.146 ms
+(9 rows)
+
+
+-- outbox poll
+                                                               QUERY PLAN
+-----------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=1.87..1.88 rows=1 width=671) (actual time=0.041..0.044 rows=0 loops=1)
+   Buffers: shared hit=4
+   ->  Sort  (cost=1.87..1.88 rows=1 width=671) (actual time=0.040..0.040 rows=0 loops=1)
+         Sort Key: id
+         Sort Method: quicksort  Memory: 25kB
+         Buffers: shared hit=4
+         ->  Index Scan using outbox_pending_idx on outbox  (cost=0.13..1.86 rows=1 width=671) (actual time=0.012..0.012 rows=0 loops=1)
+               Index Cond: (available_at <= now())
+               Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=198
+ Planning Time: 1.197 ms
+ Execution Time: 0.108 ms
+(13 rows)
+
+
+-- idempotency lookup
+                                                                QUERY PLAN
+------------------------------------------------------------------------------------------------------------------------------------------
+ Index Scan using idempotency_keys_pkey on idempotency_keys  (cost=0.42..2.64 rows=1 width=362) (actual time=0.033..0.036 rows=0 loops=1)
+   Index Cond: ((owner_id = 'demo'::text) AND (key = 'load-1-1-1795157100000-1'::text))
+   Buffers: shared hit=2 read=1
+ Planning:
+   Buffers: shared hit=126
+ Planning Time: 0.794 ms
+ Execution Time: 0.099 ms
+(7 rows)

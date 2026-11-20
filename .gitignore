@@ -1,0 +1,12 @@
+.env
+*.out
+*.test
+bin/
+dist/
+coverage*
+load/results/
+*.pprof
+.DS_Store
+
+load/accounts.json
+load/api-key.json

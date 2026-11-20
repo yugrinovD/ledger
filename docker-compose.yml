@@ -1,0 +1,224 @@
+name: ledger
+
+x-app-env: &app-env
+  LEDGER_ENV: docker
+  LEDGER_LOG_LEVEL: ${LEDGER_LOG_LEVEL:-info}
+  LEDGER_DATABASE_URL: postgres://ledger:ledger@postgres:5432/ledger?sslmode=disable
+  LEDGER_REDIS_ADDR: redis:6379
+  LEDGER_KAFKA_BROKERS: redpanda:29092
+  LEDGER_KAFKA_TOPIC: ledger.events.v1
+  LEDGER_KAFKA_DLQ_TOPIC: ledger.events.v1.dlq
+  LEDGER_KAFKA_CONSUMER_GROUP: ledger-projection
+  LEDGER_OTLP_ENDPOINT: jaeger:4317
+  LEDGER_TRACE_RATIO: ${LEDGER_TRACE_RATIO:-1}
+  LEDGER_AUTH_PEPPER: ${LEDGER_AUTH_PEPPER:-dev-pepper-change-me}
+  LEDGER_PROFILING: ${LEDGER_PROFILING:-false}
+  LEDGER_RATE_LIMIT_RPM: ${LEDGER_RATE_LIMIT_RPM:-100000}
+  LEDGER_DB_MAX_CONNS: "40"
+
+x-app-build: &app-build
+  context: .
+  args:
+    VERSION: ${LEDGER_VERSION:-dev}
+    COMMIT: ${LEDGER_COMMIT:-unknown}
+    DATE: ${LEDGER_DATE:-unknown}
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ledger
+      POSTGRES_PASSWORD: ledger
+      POSTGRES_DB: ledger
+    command:
+      - postgres
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - max_connections=200
+      - -c
+      - random_page_cost=1.1
+    ports:
+      - "${LEDGER_DB_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ledger -d ledger"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "no", "--save", ""]
+    ports:
+      - "${LEDGER_REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  redpanda:
+    image: redpandadata/redpanda:v24.3.6
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp
+      - "1"
+      - --memory
+      - 1G
+      - --reserve-memory
+      - 0M
+      - --node-id
+      - "0"
+      - --check=false
+      - --kafka-addr
+      - PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:19092
+      - --advertise-kafka-addr
+      - PLAINTEXT://redpanda:29092,OUTSIDE://localhost:19092
+    ports:
+      - "${LEDGER_KAFKA_PORT:-19092}:19092"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+
+  redpanda-console:
+    image: redpandadata/console:latest
+    environment:
+      KAFKA_BROKERS: redpanda:29092
+    ports:
+      - "${LEDGER_KAFKA_UI_PORT:-8082}:8080"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    profiles: ["observability"]
+
+  migrate:
+    image: ledger:dev
+    build: *app-build
+    entrypoint: ["/usr/local/bin/ledgerctl"]
+    command: ["migrate", "up"]
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    image: ledger:dev
+    build: *app-build
+    environment:
+      <<: *app-env
+      LEDGER_HTTP_ADDR: :8080
+      LEDGER_ADMIN_ADDR: :9090
+    ports:
+      - "${LEDGER_API_PORT:-8080}:8080"
+      - "${LEDGER_API_ADMIN_PORT:-9090}:9090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  worker:
+    image: ledger:dev
+    build: *app-build
+    entrypoint: ["/usr/local/bin/ledger-worker"]
+    environment:
+      <<: *app-env
+      LEDGER_HTTP_ADDR: :8081
+      LEDGER_ADMIN_ADDR: :9091
+      LEDGER_OUTBOX_BATCH_SIZE: "1000"
+      LEDGER_OUTBOX_POLL_INTERVAL: 100ms
+    ports:
+      - "${LEDGER_WORKER_ADMIN_PORT:-9091}:9091"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  ledgerctl:
+    image: ledger:dev
+    build: *app-build
+    user: "0:0"
+    entrypoint: ["/usr/local/bin/ledgerctl"]
+    environment: *app-env
+    volumes:
+      - ./load:/out
+    profiles: ["tools"]
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - promdata:/prometheus
+    ports:
+      - "${LEDGER_PROMETHEUS_PORT:-9095}:9090"
+    depends_on:
+      - api
+      - worker
+    profiles: ["observability"]
+
+  grafana:
+    image: grafana/grafana:11.6.0
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    ports:
+      - "${LEDGER_GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      - prometheus
+    profiles: ["observability"]
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "${LEDGER_JAEGER_UI_PORT:-16686}:16686"
+      - "${LEDGER_OTLP_PORT:-4317}:4317"
+      - "${LEDGER_OTLP_HTTP_PORT:-4318}:4318"
+    profiles: ["observability"]
+
+  k6:
+    image: grafana/k6:0.56.0
+    user: "0:0"
+    environment:
+      BASE_URL: http://api:8080
+      API_KEY: ${API_KEY:-}
+      ACCOUNTS_FILE: /scripts/accounts.json
+      RATE: ${RATE:-100}
+      DURATION: ${DURATION:-1m}
+    volumes:
+      - ./load:/scripts
+      - ./load/results:/results
+    depends_on:
+      - api
+      - worker
+    entrypoint: ["k6"]
+    command: ["run", "--out", "json=/results/last.json", "/scripts/steady.js"]
+    profiles: ["load"]
+
+volumes:
+  pgdata:
+  promdata:
+  grafanadata:

@@ -1,0 +1,17 @@
+.git
+.gitignore
+.github
+docs/assets
+load/results
+*.md
+!README.md
+!README.en.md
+*.pprof
+coverage*
+bin
+dist
+.env
+load/accounts.json
+load/api-key.json
+load/results
+docs/benchmarks
