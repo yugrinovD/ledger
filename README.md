@@ -226,12 +226,12 @@ sequenceDiagram
   participant K as Redpanda/Kafka
   participant C as Consumer
 
-  API->>DB: BEGIN; journal + balances + outbox; COMMIT
+  API->>DB: BEGIN, journal, balances, outbox, COMMIT
   R->>DB: SELECT ... WHERE published_at IS NULL
   R->>K: ProduceSync(batch, acks=all)
   R->>DB: UPDATE outbox SET published_at=now()
   K->>C: event
-  C->>DB: BEGIN; processed_events ON CONFLICT DO NOTHING; audit; COMMIT
+  C->>DB: BEGIN, dedupe processed_events, write audit, COMMIT
 ```
 
 Семантика сформулирована честно: **at-least-once delivery + idempotent
