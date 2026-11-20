@@ -26,6 +26,14 @@ Delivery is at-least-once:
   instead of blocking their aggregate forever, exposed as a metric and requeued
   by an operator through the admin API/CLI.
 
+Requeueing is an operator repair action. Once a parked event is skipped, later
+events of the same aggregate may already be published. Requeue therefore can
+restore delivery but cannot restore strict per-aggregate order; consumers must
+already tolerate this because delivery is at-least-once and retries can reorder
+across restarts. If a downstream system requires strict order after a park,
+coordinate the requeue with that system instead of assuming the relay will
+re-sort history.
+
 A single active relay is elected with a PostgreSQL advisory lock held on the
 same connection used for outbox SQL. If that connection dies, the lock is
 released and the relay stops publishing. The poll query refuses to return a

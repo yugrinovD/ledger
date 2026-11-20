@@ -2,6 +2,7 @@ package outbox
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -20,7 +21,10 @@ type Message struct {
 
 type Publisher interface {
 	Publish(ctx context.Context, topic, key string, value []byte, headers map[string]string) error
-	PublishBatch(ctx context.Context, topic string, messages []Message) error
+	// PublishBatch returns one entry per message, in the same order. A nil entry
+	// means that record was accepted by the broker; a non-nil entry is an error
+	// for that specific record. Implementations must return len(messages) items.
+	PublishBatch(ctx context.Context, topic string, messages []Message) []error
 	Close() error
 }
 
@@ -141,38 +145,56 @@ func (r *Relay) RelayOnce(ctx context.Context, conn *pgxpool.Conn) (int, error) 
 		return 0, nil
 	}
 	messages := make([]Message, 0, len(events))
-	ids := make([]int64, 0, len(events))
 	for _, e := range events {
 		messages = append(messages, Message{Key: e.AggregateID.String(), Value: e.Payload, Headers: e.Headers})
-		ids = append(ids, e.ID)
 	}
-	if err := r.publisher.PublishBatch(ctx, r.topic, messages); err != nil {
-		r.metrics.OutboxFailures.Add(float64(len(events)))
-		reason := truncate(err.Error(), 1000)
-		for _, e := range events {
-			if e.Attempts+1 >= r.maxAttempts {
-				if markErr := r.store.MarkOutboxParked(ctx, conn, e.ID, reason); markErr != nil {
-					r.logger.Error("park outbox event", "event_id", e.EventID.String(), "err", markErr)
+	results := r.publisher.PublishBatch(ctx, r.topic, messages)
+	if len(results) != len(events) {
+		return 0, fmt.Errorf("publisher returned %d results for %d messages", len(results), len(events))
+	}
+
+	publishedIDs := make([]int64, 0, len(events))
+	type failedEvent struct {
+		event  Event
+		reason string
+	}
+	failed := make([]failedEvent, 0)
+	for i, e := range events {
+		if results[i] == nil {
+			publishedIDs = append(publishedIDs, e.ID)
+			continue
+		}
+		failed = append(failed, failedEvent{event: e, reason: truncate(results[i].Error(), 1000)})
+	}
+
+	if len(publishedIDs) > 0 {
+		if err := r.store.MarkOutboxPublishedBatch(ctx, conn, publishedIDs); err != nil {
+			return 0, err
+		}
+		r.metrics.OutboxPublished.Add(float64(len(publishedIDs)))
+	}
+	if len(failed) > 0 {
+		r.metrics.OutboxFailures.Add(float64(len(failed)))
+		for _, f := range failed {
+			if f.event.Attempts+1 >= r.maxAttempts {
+				if markErr := r.store.MarkOutboxParked(ctx, conn, f.event.ID, f.reason); markErr != nil {
+					r.logger.Error("park outbox event", "event_id", f.event.EventID.String(), "err", markErr)
+				} else {
+					r.metrics.OutboxParked.Inc()
 				}
-				r.metrics.OutboxParked.Inc()
 				r.logger.Error("outbox event parked after exceeding retry budget",
-					"event_id", e.EventID.String(), "attempts", e.Attempts+1, "err", err)
+					"event_id", f.event.EventID.String(), "attempts", f.event.Attempts+1, "err", f.reason)
 				continue
 			}
-			backoff := r.backoff(e.Attempts)
-			if markErr := r.store.MarkOutboxFailed(ctx, conn, e.ID, reason, backoff); markErr != nil {
-				r.logger.Error("mark outbox failure", "event_id", e.EventID.String(), "err", markErr)
+			backoff := r.backoff(f.event.Attempts)
+			if markErr := r.store.MarkOutboxFailed(ctx, conn, f.event.ID, f.reason, backoff); markErr != nil {
+				r.logger.Error("mark outbox failure", "event_id", f.event.EventID.String(), "err", markErr)
 			}
 		}
-		r.logger.Warn("outbox batch publish failed", "count", len(events), "err", err)
-		return 0, nil
+		r.logger.Warn("outbox batch partially failed", "failed", len(failed), "published", len(publishedIDs))
 	}
-	if err := r.store.MarkOutboxPublishedBatch(ctx, conn, ids); err != nil {
-		return 0, err
-	}
-	r.metrics.OutboxPublished.Add(float64(len(events)))
-	r.logger.Debug("outbox batch published", "count", len(events))
-	return len(events), nil
+	r.logger.Debug("outbox batch completed", "published", len(publishedIDs), "failed", len(failed))
+	return len(publishedIDs), nil
 }
 
 func (r *Relay) backoff(attempts int) time.Duration {

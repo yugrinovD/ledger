@@ -290,7 +290,10 @@ advisory lock на том же соединении, через которое �
 `LEDGER_OUTBOX_MAX_ATTEMPTS`, получает `parked_at`: оно перестаёт блокировать
 очередь агрегата, отражается в метрике `ledger_outbox_parked_events` и может быть
 возвращено оператором через `/admin/outbox/{id}/requeue` или `ledgerctl outbox
-requeue`.
+requeue`. Requeue — операторский repair: если более поздние события того же
+агрегата уже опубликованы, порядок не восстанавливается. Строгий per-aggregate
+order гарантируется только для штатного пути без parking/requeue; consumers
+обязаны быть идемпотентными и терпимыми к переупорядочиванию.
 
 ## Конкурентность, изоляция, deadlock
 
@@ -350,15 +353,15 @@ docker compose --profile tools run --rm ledgerctl reconcile --repair
 ## Наблюдаемость
 
 - **Метрики**: HTTP RED, transfers by status, idempotency replays, outbox
-  pending/lag/failures, consumer events, tx retries, holds expired,
+  pending/lag/failures/parked, consumer events, tx retries, holds expired,
   reconciliation discrepancies, retention deletes, estimated table rows,
   Go runtime/process.
 - **Трейсы**: OTel → Jaeger. `traceparent` кладётся в headers outbox-события,
   поэтому один трейс покрывает `HTTP → usecase → outbox → Kafka → consumer`.
 - **Логи**: JSON `slog`, `request_id`, `trace_id`, `owner_id`, без секретов и PII.
 - **pprof**: admin-порт, включается `LEDGER_PROFILING=true` (по умолчанию выключен; `LEDGER_PROFILING=true make up`).
-- **Алерты**: outbox backlog/lag, 5xx > 1%, p99 > 500 мс, discrepancy > 0,
-  высокий retry rate.
+- **Алерты**: outbox backlog/lag/parked, 5xx > 1%, p99 > 500 мс,
+  discrepancy > 0, высокий retry rate.
 - **Retention**: published outbox — 7 дней, processed/audit/reconciliation —
   30 дней; настройки через `LEDGER_*_RETENTION`. Это не заменяет
   партиционирование больших журналов.

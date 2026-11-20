@@ -156,6 +156,10 @@ paths:
     post:
       tags: [outbox]
       summary: Requeue a parked outbox event
+      description: |
+        Re-injects the event into the outbox. If later events of the same
+        aggregate were already published after parking, this cannot restore
+        strict per-aggregate order; consumers must tolerate reordering.
       operationId: requeueOutbox
       parameters:
         - name: eventID

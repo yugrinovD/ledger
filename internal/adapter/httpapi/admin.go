@@ -18,7 +18,7 @@ func NewAdminHandler(base http.Handler, svc *usecase.Service, token string, logg
 		base = http.NotFoundHandler()
 	}
 	if svc == nil {
-		return base
+		return securityHeaders()(base)
 	}
 	h := NewHandlers(svc)
 	mux := http.NewServeMux()
@@ -31,7 +31,7 @@ func NewAdminHandler(base http.Handler, svc *usecase.Service, token string, logg
 	mux.Handle("GET /admin/outbox/parked", adminAuth(token, logger, http.HandlerFunc(h.ListParkedOutbox)))
 	mux.Handle("POST /admin/outbox/{eventID}/requeue", adminAuth(token, logger, http.HandlerFunc(h.RequeueOutbox)))
 	mux.Handle("/", base)
-	return mux
+	return securityHeaders()(mux)
 }
 
 func adminAuth(token string, logger *slog.Logger, next http.Handler) http.Handler {

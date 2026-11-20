@@ -81,6 +81,62 @@ func TestOutboxParksPoisonEventAndLetsLaterEventsThrough(t *testing.T) {
 	}
 }
 
+func TestOutboxPartialBatchOnlyParksPoisonRecord(t *testing.T) {
+	pool, store, _ := setup(t)
+	ctx := context.Background()
+	poison := insertOutboxEvent(t, pool, store, uuid.New(), "poison.event")
+	healthy := insertOutboxEvent(t, pool, store, uuid.New(), "healthy.event")
+	if _, err := pool.Exec(ctx, `UPDATE outbox SET payload = '{"poison":true}'::jsonb WHERE event_id = $1`, poison.EventID); err != nil {
+		t.Fatal(err)
+	}
+
+	pub := &fakePublisher{failMarker: `"poison"`}
+	relay := outbox.NewRelay(pool, store, pub, "ledger.events.test", 100, time.Millisecond, 1, testLogger(), testMetrics())
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Release()
+
+	n, err := relay.RelayOnce(ctx, conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("published = %d, want 1 healthy event", n)
+	}
+	if pub.count() != 1 || pub.pubs[0].Key != healthy.AggregateID.String() {
+		t.Fatalf("healthy event was not published correctly: %+v", pub.pubs)
+	}
+	if parked, err := store.OutboxParkedCount(ctx, pool); err != nil {
+		t.Fatal(err)
+	} else if parked != 1 {
+		t.Fatalf("parked = %d, want only the poison event", parked)
+	}
+	list, err := store.ListParkedOutbox(ctx, pool, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].EventID != poison.EventID {
+		t.Fatalf("unexpected parked events: %+v", list)
+	}
+	if countRows(t, pool, `SELECT count(*) FROM outbox WHERE event_id = $1 AND published_at IS NOT NULL`, healthy.EventID) != 1 {
+		t.Fatal("healthy event was not marked published")
+	}
+	if countRows(t, pool, `SELECT count(*) FROM outbox WHERE event_id = $1 AND parked_at IS NOT NULL`, poison.EventID) != 1 {
+		t.Fatal("poison event was not parked")
+	}
+
+	if requeued, err := store.RequeueOutbox(ctx, pool, list[0].ID); err != nil {
+		t.Fatal(err)
+	} else if !requeued {
+		t.Fatal("poison event was not requeued")
+	}
+	if countRows(t, pool, `SELECT count(*) FROM outbox WHERE event_id = $1 AND parked_at IS NULL AND published_at IS NOT NULL`, healthy.EventID) != 1 {
+		t.Fatal("requeue changed the already-published healthy event")
+	}
+}
+
 func TestOutboxRelayRunAcquiresLeadershipAndPublishes(t *testing.T) {
 	pool, store, _ := setup(t)
 	aggregate := uuid.New()

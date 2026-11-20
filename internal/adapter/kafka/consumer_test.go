@@ -34,13 +34,12 @@ func (f *fakeDLQ) Publish(_ context.Context, topic, key string, _ []byte, header
 	return nil
 }
 
-func (f *fakeDLQ) PublishBatch(ctx context.Context, topic string, messages []outbox.Message) error {
-	for _, m := range messages {
-		if err := f.Publish(ctx, topic, m.Key, m.Value, m.Headers); err != nil {
-			return err
-		}
+func (f *fakeDLQ) PublishBatch(ctx context.Context, topic string, messages []outbox.Message) []error {
+	errs := make([]error, len(messages))
+	for i, m := range messages {
+		errs[i] = f.Publish(ctx, topic, m.Key, m.Value, m.Headers)
 	}
-	return nil
+	return errs
 }
 
 func (f *fakeDLQ) Close() error { return nil }

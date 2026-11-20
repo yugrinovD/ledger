@@ -19,6 +19,15 @@ groups:
           summary: "Outbox relay is lagging"
           description: "The oldest unpublished event is {{ $value }} seconds old."
 
+      - alert: LedgerOutboxParked
+        expr: ledger_outbox_parked_events > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Parked outbox events require operator action"
+          description: "{{ $value }} events are parked on {{ $labels.instance }}. Inspect /admin/outbox/parked and requeue after fixing the cause."
+
       - alert: LedgerHighErrorRate
         expr: |
           sum(rate(ledger_http_requests_total{status=~"5.."}[5m]))

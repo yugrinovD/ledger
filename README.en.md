@@ -23,9 +23,11 @@ short English overview for reviewers.
 - Independent reconciliation, admin-only and protected by `LEDGER_ADMIN_TOKEN`,
   that detects drift, empty transactions and broken hold captures, and repairs
   derived balances without touching the journal.
-- Strict per-aggregate outbox ordering; relay leadership uses the same DB
-  connection for its advisory lock and every outbox query. Events that exhaust
-  the relay retry budget are parked and can be requeued from admin/CLI.
+- Strict per-aggregate outbox ordering on the normal path; relay leadership uses
+  the same DB connection for its advisory lock and every outbox query. Events
+  that exhaust the relay retry budget are parked and can be requeued from
+  admin/CLI. Requeue cannot restore order once later events were published, so
+  consumers must remain idempotent and order-tolerant.
 - Retention jobs for published outbox, processed/audit events and reconciliation
   history; freeze/unfreeze/close accounts and revoke API keys via admin CLI/API.
 - API keys, rate limiting, OpenAPI, migrations, CLI, metrics, structured logs,

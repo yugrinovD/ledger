@@ -28,10 +28,15 @@ func NewProducer(brokers []string, clientID string) (*Producer, error) {
 }
 
 func (p *Producer) Publish(ctx context.Context, topic, key string, value []byte, headers map[string]string) error {
-	return p.PublishBatch(ctx, topic, []outbox.Message{{Key: key, Value: value, Headers: headers}})
+	for _, err := range p.PublishBatch(ctx, topic, []outbox.Message{{Key: key, Value: value, Headers: headers}}) {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-func (p *Producer) PublishBatch(ctx context.Context, topic string, messages []outbox.Message) error {
+func (p *Producer) PublishBatch(ctx context.Context, topic string, messages []outbox.Message) []error {
 	if len(messages) == 0 {
 		return nil
 	}
@@ -44,7 +49,19 @@ func (p *Producer) PublishBatch(ctx context.Context, topic string, messages []ou
 			Headers: recordHeaders(m.Headers),
 		})
 	}
-	return p.client.ProduceSync(ctx, records...).FirstErr()
+	results := p.client.ProduceSync(ctx, records...)
+	errs := make([]error, len(messages))
+	if len(results) != len(messages) {
+		err := fmt.Errorf("kafka producer returned %d results for %d messages", len(results), len(messages))
+		for i := range errs {
+			errs[i] = err
+		}
+		return errs
+	}
+	for i := range results {
+		errs[i] = results[i].Err
+	}
+	return errs
 }
 
 func (p *Producer) Close() error {

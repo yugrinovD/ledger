@@ -253,10 +253,9 @@ func (s *Store) FindEmptyTransactions(ctx context.Context, q Querier) ([]reconci
 		}
 		d.Kind = "empty_transaction"
 		d.TransactionID = &txID
-		expected := int64(1)
 		actual := int64(0)
-		d.Expected = &expected
 		d.Actual = &actual
+		d.Details = map[string]any{"entries": 0}
 		out = append(out, d)
 	}
 	return out, rows.Err()

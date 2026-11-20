@@ -50,10 +50,3 @@ func TestRunHoldSweeperExpiresHolds(t *testing.T) {
 		t.Fatal("sweeper did not stop")
 	}
 }
-
-func TestRunHoldSweeperDisabledWithNonPositiveInterval(t *testing.T) {
-	fake := &fakeHoldExpirer{expired: make(chan uuid.UUID, 1)}
-	if err := runHoldSweeper(context.Background(), fake, slog.New(slog.NewTextHandler(io.Discard, nil)), 0); err != nil {
-		t.Fatal(err)
-	}
-}

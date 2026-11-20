@@ -159,9 +159,6 @@ type holdExpirer interface {
 }
 
 func runHoldSweeper(ctx context.Context, svc holdExpirer, logger *slog.Logger, interval time.Duration) error {
-	if interval <= 0 {
-		return nil
-	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -288,9 +285,6 @@ func runReconciler(ctx context.Context, svc *usecase.Service, logger *slog.Logge
 	}
 	// Run once on startup so a fresh demo dashboard is not empty for 15 minutes.
 	run()
-	if interval <= 0 {
-		return nil
-	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {

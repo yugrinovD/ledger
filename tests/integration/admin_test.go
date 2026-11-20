@@ -50,6 +50,8 @@ func TestAdminEndpointsFreezeRevokeAndTenantIsolation(t *testing.T) {
 	}
 	if res := adminGet(t, admin.URL+"/admin/reconciliation/runs", adminToken); res.StatusCode != http.StatusOK {
 		t.Fatalf("admin with token = %d body=%s", res.StatusCode, res.Body)
+	} else if res.Header.Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatal("admin security headers are missing")
 	}
 
 	if res := adminPost(t, admin.URL+"/admin/accounts/"+alice.ID+"/freeze", adminToken); res.StatusCode != http.StatusOK {

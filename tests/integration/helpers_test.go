@@ -26,6 +26,8 @@ var (
 	migrateErr  error
 )
 
+const testMigrationLockKey int64 = 0x4c4544474552544d
+
 func testDSN(t *testing.T) string {
 	t.Helper()
 	dsn := os.Getenv("TEST_DATABASE_URL")
@@ -41,11 +43,11 @@ func testDSN(t *testing.T) string {
 			return
 		}
 		defer conn.Close(ctx)
-		if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock(hashtext('ledger_test_migrations'))`); err != nil {
+		if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, testMigrationLockKey); err != nil {
 			migrateErr = err
 			return
 		}
-		defer conn.Exec(context.Background(), `SELECT pg_advisory_unlock(hashtext('ledger_test_migrations'))`)
+		defer conn.Exec(context.Background(), `SELECT pg_advisory_unlock($1)`, testMigrationLockKey)
 		migrateErr = postgres.Migrate(ctx, dsn, postgres.MigrateUp)
 	})
 	if migrateErr != nil {

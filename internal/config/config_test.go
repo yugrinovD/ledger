@@ -70,6 +70,9 @@ func TestLoadRejectsNonPositiveIntervals(t *testing.T) {
 		"LEDGER_RECONCILIATION_INTERVAL",
 		"LEDGER_HOLD_SWEEP_INTERVAL",
 		"LEDGER_SHUTDOWN_TIMEOUT",
+		"LEDGER_REQUEST_TIMEOUT",
+		"LEDGER_READ_HEADER_TIMEOUT",
+		"LEDGER_DB_CONNECT_TIMEOUT",
 	} {
 		t.Run(key, func(t *testing.T) {
 			cleanEnv(t)
@@ -78,6 +81,14 @@ func TestLoadRejectsNonPositiveIntervals(t *testing.T) {
 				t.Fatalf("expected %s=0s to fail", key)
 			}
 		})
+	}
+}
+
+func TestLoadRejectsNegativeRedisDB(t *testing.T) {
+	cleanEnv(t)
+	t.Setenv("LEDGER_REDIS_DB", "-1")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected negative Redis DB to fail")
 	}
 }
 

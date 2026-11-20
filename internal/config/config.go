@@ -174,6 +174,14 @@ func (c Config) validate() error {
 		return fmt.Errorf("LEDGER_HOLD_SWEEP_INTERVAL must be positive")
 	case c.ShutdownTimeout <= 0:
 		return fmt.Errorf("LEDGER_SHUTDOWN_TIMEOUT must be positive")
+	case c.RequestTimeout <= 0:
+		return fmt.Errorf("LEDGER_REQUEST_TIMEOUT must be positive")
+	case c.ReadHeaderTimeout <= 0:
+		return fmt.Errorf("LEDGER_READ_HEADER_TIMEOUT must be positive")
+	case c.DBConnectTimeout <= 0:
+		return fmt.Errorf("LEDGER_DB_CONNECT_TIMEOUT must be positive")
+	case c.RedisDB < 0:
+		return fmt.Errorf("LEDGER_REDIS_DB must not be negative")
 	case c.OutboxRetention <= 0 || c.ProcessedEventsRetention <= 0 || c.AuditRetention <= 0 || c.ReconciliationRetention <= 0:
 		return fmt.Errorf("retention durations must be positive")
 	case math.IsNaN(c.TraceRatio) || c.TraceRatio < 0 || c.TraceRatio > 1:

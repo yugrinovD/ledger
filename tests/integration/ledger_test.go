@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -415,9 +416,10 @@ func TestConsumerDeduplicatesEvents(t *testing.T) {
 }
 
 type fakePublisher struct {
-	mu       sync.Mutex
-	pubs     []published
-	failures int
+	mu         sync.Mutex
+	pubs       []published
+	failures   int
+	failMarker string
 }
 
 type published struct {
@@ -427,20 +429,34 @@ type published struct {
 }
 
 func (f *fakePublisher) Publish(ctx context.Context, topic, key string, value []byte, headers map[string]string) error {
-	return f.PublishBatch(ctx, topic, []outbox.Message{{Key: key, Value: value, Headers: headers}})
-}
-
-func (f *fakePublisher) PublishBatch(_ context.Context, topic string, messages []outbox.Message) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.failures > 0 {
-		f.failures--
-		return errors.New("simulated broker outage")
-	}
-	for _, m := range messages {
-		f.pubs = append(f.pubs, published{Topic: topic, Key: m.Key, Value: append([]byte(nil), m.Value...)})
+	for _, err := range f.PublishBatch(ctx, topic, []outbox.Message{{Key: key, Value: value, Headers: headers}}) {
+		if err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+func (f *fakePublisher) PublishBatch(_ context.Context, topic string, messages []outbox.Message) []error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	errs := make([]error, len(messages))
+	if f.failures > 0 {
+		f.failures--
+		err := errors.New("simulated broker outage")
+		for i := range errs {
+			errs[i] = err
+		}
+		return errs
+	}
+	for i, m := range messages {
+		if f.failMarker != "" && strings.Contains(string(m.Value), f.failMarker) {
+			errs[i] = errors.New("simulated poison record")
+			continue
+		}
+		f.pubs = append(f.pubs, published{Topic: topic, Key: m.Key, Value: append([]byte(nil), m.Value...)})
+	}
+	return errs
 }
 
 func (f *fakePublisher) Close() error { return nil }
