@@ -43,7 +43,7 @@ func TestHTTPAPIFlowAndIdempotency(t *testing.T) {
 	cfg := config.Config{AuthPepper: pepper, RequestTimeout: 5 * time.Second, RateLimitRPM: 0}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	metrics := observability.NewMetrics(prometheus.NewRegistry())
-	server := httptest.NewServer(httpapi.NewServer(cfg, store, svc, logger, metrics, nil).PublicHandler())
+	server := httptest.NewServer(httpapi.NewServer(cfg, store, svc, logger, metrics, nil, nil).PublicHandler())
 	defer server.Close()
 
 	bob := apiCreateAccount(t, server.URL, plainKey, "bob-wallet")
@@ -192,4 +192,27 @@ func doRequest(t *testing.T, req *http.Request) httpResult {
 		t.Fatal(err)
 	}
 	return httpResult{StatusCode: res.StatusCode, Header: res.Header.Clone(), Body: body}
+}
+
+func TestMissingScopeReturnsForbidden(t *testing.T) {
+	_, store, svc := setup(t)
+	system := createAccount(t, svc, "system", "system-equity", "USD", "equity", true)
+	alice := createAccount(t, svc, "alice", "alice-wallet", "USD", "liability", false)
+	bob := createAccount(t, svc, "bob", "bob-wallet", "USD", "liability", false)
+	fund(t, svc, system.ID, alice.ID, "10.00", "USD")
+
+	_, readOnlyKey := createAPIKeyWithScopes(t, store, "scope-pepper", "alice", []string{"accounts:read"})
+	cfg := config.Config{AuthPepper: "scope-pepper", RequestTimeout: 5 * time.Second}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	metrics := observability.NewMetrics(prometheus.NewRegistry())
+	server := httptest.NewServer(httpapi.NewServer(cfg, store, svc, logger, metrics, nil, nil).PublicHandler())
+	defer server.Close()
+
+	res := apiPost(t, server.URL+"/v1/transfers", readOnlyKey, "forbidden-transfer", map[string]any{
+		"source_account_id": alice.ID, "destination_account_id": bob.ID,
+		"amount": "1.00", "currency": "USD",
+	})
+	if res.StatusCode != http.StatusForbidden {
+		t.Fatalf("missing scope = %d body=%s, want 403", res.StatusCode, res.Body)
+	}
 }

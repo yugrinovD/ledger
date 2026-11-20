@@ -17,8 +17,7 @@ import (
 )
 
 type Store interface {
-	TryInsertIdempotency(ctx context.Context, tx pgx.Tx, r Record) (bool, error)
-	LockIdempotency(ctx context.Context, tx pgx.Tx, ownerID, key string) (Record, error)
+	AcquireIdempotency(ctx context.Context, tx pgx.Tx, r Record) (Record, bool, error)
 	CompleteIdempotency(ctx context.Context, tx pgx.Tx, ownerID, key string, statusCode int, body []byte, resourceType string, resourceID *uuid.UUID) error
 }
 
@@ -63,7 +62,7 @@ func (e *Executor) Execute(
 	err = retry.Do(ctx, retry.Default(), func(ctx context.Context) error {
 		return pgx.BeginTxFunc(ctx, e.pool, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}, func(tx pgx.Tx) error {
 			now := time.Now().UTC()
-			inserted, err := e.store.TryInsertIdempotency(ctx, tx, Record{
+			rec, inserted, err := e.store.AcquireIdempotency(ctx, tx, Record{
 				OwnerID:     ownerID,
 				Key:         key,
 				RequestHash: hash,
@@ -76,10 +75,6 @@ func (e *Executor) Execute(
 				return err
 			}
 			if !inserted {
-				rec, err := e.store.LockIdempotency(ctx, tx, ownerID, key)
-				if err != nil {
-					return err
-				}
 				if !bytes.Equal(rec.RequestHash, hash) {
 					return &domain.Error{
 						Code:    domain.CodeIdempotencyConflict,

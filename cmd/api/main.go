@@ -38,6 +38,9 @@ func run() error {
 		return fmt.Errorf("load config: %w", err)
 	}
 	logger := observability.NewLogger(cfg.LogLevel)
+	for _, warning := range cfg.Warnings() {
+		logger.Warn(warning)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -81,8 +84,10 @@ func run() error {
 		func(int, error) { metrics.TxRetries.Inc() },
 	)
 	svc := usecase.New(store, pool, idem, metrics, logger)
+	svc.SetReconciliationTimeout(cfg.ReconciliationStatementTimeout)
 	limiter := ratelimit.New(redisClient, cfg.RateLimitRPM, time.Minute)
-	server := httpapi.NewServer(cfg, store, svc, logger, metrics, limiter)
+	preAuthLimiter := ratelimit.New(redisClient, cfg.PreAuthRateLimitRPM, time.Minute)
+	server := httpapi.NewServer(cfg, store, svc, logger, metrics, limiter, preAuthLimiter)
 
 	public := &http.Server{
 		Addr:              cfg.HTTPAddr,
@@ -92,9 +97,10 @@ func run() error {
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
+	adminBase := observability.AdminHandler(registry, store.Ping, cfg.Profiling)
 	admin := &http.Server{
 		Addr:              cfg.AdminAddr,
-		Handler:           observability.AdminHandler(registry, store.Ping, cfg.Profiling),
+		Handler:           httpapi.NewAdminHandler(adminBase, svc, cfg.AdminToken, logger),
 		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      30 * time.Second,

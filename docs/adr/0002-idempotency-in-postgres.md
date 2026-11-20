@@ -22,8 +22,13 @@ as the transfer, journal entries, balance updates and outbox event:
 4. A successful response is stored in `status_code` and `response_body` before
    commit. Replays return exactly the original response.
 5. A 5xx or crash rolls back the key together with the effect, so a retry is safe.
+6. `AcquireIdempotency` replaces expired rows under `FOR UPDATE` and retries the
+   insert if cleanup deleted the conflicting row between `INSERT` and `SELECT`.
+   This makes TTL atomic and removes the cleanup race.
 
-Keys are scoped by `(owner_id, key)` and expire after 24 hours.
+Keys are scoped by `(owner_id, key)` and expire after 24 hours. The transfer/hold
+tables keep a permanent unique key, so a retry after TTL returns 409 instead of
+creating a second effect.
 
 ## Consequences
 

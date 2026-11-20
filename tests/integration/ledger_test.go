@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/yugrinovD/ledger/internal/domain"
+	"github.com/yugrinovD/ledger/internal/idempotency"
 	"github.com/yugrinovD/ledger/internal/usecase"
 )
 
@@ -361,14 +362,19 @@ func TestOutboxRelayRetriesAndPublishes(t *testing.T) {
 
 	pub := &fakePublisher{failures: 1000}
 	relay := newRelay(pool, store, pub)
-	if n, err := relay.RelayOnce(context.Background()); err != nil {
+	conn, err := pool.Acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Release()
+	if n, err := relay.RelayOnce(context.Background(), conn); err != nil {
 		t.Fatalf("first relay: %v", err)
 	} else if n != 0 {
 		t.Fatalf("expected no published events on failure, got %d", n)
 	}
 	pub.setFailures(0)
 	time.Sleep(200 * time.Millisecond)
-	n, err := relay.RelayOnce(context.Background())
+	n, err := relay.RelayOnce(context.Background(), conn)
 	if err != nil {
 		t.Fatalf("second relay: %v", err)
 	}
@@ -378,7 +384,7 @@ func TestOutboxRelayRetriesAndPublishes(t *testing.T) {
 	if pub.count() == 0 {
 		t.Fatal("publisher was not called")
 	}
-	pending, _, err := store.OutboxStats(context.Background())
+	pending, _, err := store.OutboxStats(context.Background(), pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -488,5 +494,80 @@ func TestIdempotencyCanonicalAmountAndDefaultHoldExpiry(t *testing.T) {
 	})
 	if err != nil || !replayed || hold2.ID != hold1.ID {
 		t.Fatalf("default hold expiry must replay: replayed=%v err=%v", replayed, err)
+	}
+}
+
+func TestIdempotencyExpiredRowIsReplaced(t *testing.T) {
+	pool, store, _ := setup(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	record := idempotency.Record{
+		OwnerID: "owner", Key: "ttl-key", RequestHash: []byte("old"), Method: "POST",
+		Path: "/v1/transfers", CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+	}
+	var inserted bool
+	if err := pgx.BeginTxFunc(ctx, pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
+		var err error
+		_, inserted, err = store.AcquireIdempotency(ctx, tx, record)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !inserted {
+		t.Fatal("first acquire must insert")
+	}
+	if _, err := pool.Exec(ctx, `UPDATE idempotency_keys SET expires_at = now() - interval '1 hour' WHERE owner_id = 'owner' AND key = 'ttl-key'`); err != nil {
+		t.Fatal(err)
+	}
+	record.RequestHash = []byte("new")
+	if err := pgx.BeginTxFunc(ctx, pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
+		var err error
+		_, inserted, err = store.AcquireIdempotency(ctx, tx, record)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !inserted {
+		t.Fatal("expired row must be replaced, not replayed")
+	}
+	var hash []byte
+	if err := pool.QueryRow(ctx, `SELECT request_hash FROM idempotency_keys WHERE owner_id = 'owner' AND key = 'ttl-key'`).Scan(&hash); err != nil {
+		t.Fatal(err)
+	}
+	if string(hash) != "new" {
+		t.Fatalf("hash = %q, want new", hash)
+	}
+}
+
+func TestTransferEntryCountUsesTransactionAndTransferIDsCorrectly(t *testing.T) {
+	pool, store, svc := setup(t)
+	alice := createAccount(t, svc, "alice", "alice-wallet", "USD", "liability", false)
+	bob := createAccount(t, svc, "bob", "bob-wallet", "USD", "liability", false)
+	ctx := context.Background()
+	txID, transferID := uuid.New(), uuid.New()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO journal_transactions (id, type, status) VALUES ($1, 'transfer', 'posted')`, txID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO transfers (id, owner_id, idempotency_key, transaction_id, source_account_id,
+			destination_account_id, amount_minor, currency)
+		VALUES ($1, 'alice', 'broken-transfer', $2, $3, $4, 100, 'USD')`,
+		transferID, txID, mustParse(t, alice.ID), mustParse(t, bob.ID)); err != nil {
+		t.Fatal(err)
+	}
+	items, err := store.FindTransferEntryCountAnomalies(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected one anomaly, got %d", len(items))
+	}
+	d := items[0]
+	if d.TransactionID == nil || *d.TransactionID != txID {
+		t.Fatalf("transaction_id = %v, want %s", d.TransactionID, txID)
+	}
+	if d.Details["transfer_id"] != transferID.String() {
+		t.Fatalf("transfer_id detail = %v, want %s", d.Details["transfer_id"], transferID)
 	}
 }

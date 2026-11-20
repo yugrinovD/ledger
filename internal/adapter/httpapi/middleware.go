@@ -76,7 +76,7 @@ func requestID() func(http.Handler) http.Handler {
 	}
 }
 
-func accessLog(logger *slog.Logger) func(http.Handler) http.Handler {
+func accessLog(logger *slog.Logger, trusted []*net.IPNet) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
@@ -94,7 +94,7 @@ func accessLog(logger *slog.Logger) func(http.Handler) http.Handler {
 				"status", status,
 				"bytes", sw.bytes,
 				"duration_ms", float64(time.Since(start).Microseconds()) / 1000,
-				"remote_ip", clientIP(r),
+				"remote_ip", clientIP(r, trusted),
 			}
 			if p, ok := PrincipalFrom(r.Context()); ok {
 				attrs = append(attrs, "owner_id", p.OwnerID)
@@ -179,12 +179,12 @@ func authMiddleware(store *postgres.Store, pepper string, logger *slog.Logger) f
 	}
 }
 
-func requireScope(scope string) func(http.Handler) http.Handler {
+func requireScope(scope string, logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			p, ok := PrincipalFrom(r.Context())
 			if !ok || !auth.HasScope(p.Scopes, scope) {
-				writeProblem(w, r, slog.Default(), &domain.Error{Code: domain.CodeForbidden, Message: "missing scope " + scope, Err: domain.ErrValidation})
+				writeProblem(w, r, logger, &domain.Error{Code: domain.CodeForbidden, Message: "missing scope " + scope, Err: domain.ErrValidation})
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -192,10 +192,10 @@ func requireScope(scope string) func(http.Handler) http.Handler {
 	}
 }
 
-func rateLimitMiddleware(limiter *ratelimit.Limiter, logger *slog.Logger, limit int) func(http.Handler) http.Handler {
+func rateLimitMiddleware(limiter *ratelimit.Limiter, logger *slog.Logger, limit int, trusted []*net.IPNet) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			key := clientIP(r)
+			key := clientIP(r, trusted)
 			if p, ok := PrincipalFrom(r.Context()); ok {
 				key = "owner:" + p.OwnerID
 			}
@@ -229,18 +229,30 @@ func bearerToken(r *http.Request) string {
 	return strings.TrimSpace(r.Header.Get("X-API-Key"))
 }
 
-func clientIP(r *http.Request) string {
-	if ip := r.Header.Get("X-Forwarded-For"); ip != "" {
-		if i := strings.IndexByte(ip, ','); i >= 0 {
-			return strings.TrimSpace(ip[:i])
-		}
-		return strings.TrimSpace(ip)
-	}
+func clientIP(r *http.Request, trusted []*net.IPNet) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		host = r.RemoteAddr
+	}
+	remote := net.ParseIP(host)
+	if remote != nil && isTrusted(remote, trusted) {
+		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+			if i := strings.IndexByte(forwarded, ','); i >= 0 {
+				return strings.TrimSpace(forwarded[:i])
+			}
+			return strings.TrimSpace(forwarded)
+		}
 	}
 	return host
+}
+
+func isTrusted(ip net.IP, networks []*net.IPNet) bool {
+	for _, network := range networks {
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func routePattern(r *http.Request) string {

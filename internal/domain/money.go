@@ -3,6 +3,7 @@ package domain
 import (
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 )
 
@@ -57,11 +58,11 @@ func ParseAmount(input string, currency Currency) (int64, error) {
 	}
 
 	whole, frac, hasDot := strings.Cut(s, ".")
+	if hasDot && (whole == "" || frac == "") {
+		return 0, fmt.Errorf("%w: amount must have digits on both sides of the decimal point", ErrValidation)
+	}
 	if hasDot && strings.Contains(frac, ".") {
 		return 0, fmt.Errorf("%w: invalid amount", ErrValidation)
-	}
-	if whole == "" {
-		whole = "0"
 	}
 	scale := currency.Scale()
 	if len(frac) > scale {
@@ -93,19 +94,22 @@ func ParseAmount(input string, currency Currency) (int64, error) {
 func FormatAmount(minor int64, currency Currency) string {
 	scale := currency.Scale()
 	if scale == 0 {
-		return fmt.Sprintf("%d", minor)
+		return strconv.FormatInt(minor, 10)
 	}
 	sign := ""
-	u := minor
-	if u < 0 {
+	var magnitude uint64
+	if minor < 0 {
 		sign = "-"
-		u = -u
+		// Avoid overflowing on math.MinInt64: negate through unsigned arithmetic.
+		magnitude = uint64(-(minor + 1)) + 1
+	} else {
+		magnitude = uint64(minor)
 	}
-	div := int64(1)
+	div := uint64(1)
 	for i := 0; i < scale; i++ {
 		div *= 10
 	}
-	whole := u / div
-	frac := u % div
+	whole := magnitude / div
+	frac := magnitude % div
 	return fmt.Sprintf("%s%d.%0*d", sign, whole, scale, frac)
 }

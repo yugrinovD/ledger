@@ -2,6 +2,8 @@ package usecase
 
 import (
 	"context"
+	"errors"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -58,8 +60,7 @@ func (s *Service) Reconcile(ctx context.Context, repair bool) (ReconciliationRes
 	if checkErr != nil {
 		run.Status = "failed"
 		run.Error = checkErr.Error()
-		_ = s.store.FinishReconciliationRun(ctx, run)
-		return ReconciliationResult{}, checkErr
+		return ReconciliationResult{}, s.failRun(ctx, run, checkErr)
 	}
 
 	run.CheckedAccounts = checked
@@ -68,8 +69,7 @@ func (s *Service) Reconcile(ctx context.Context, repair bool) (ReconciliationRes
 	if err := s.store.InsertDiscrepancies(ctx, runID, discrepancies); err != nil {
 		run.Status = "failed"
 		run.Error = err.Error()
-		_ = s.store.FinishReconciliationRun(ctx, run)
-		return ReconciliationResult{}, err
+		return ReconciliationResult{}, s.failRun(ctx, run, err)
 	}
 
 	if repair {
@@ -77,18 +77,43 @@ func (s *Service) Reconcile(ctx context.Context, repair bool) (ReconciliationRes
 		if err != nil {
 			run.Status = "failed"
 			run.Error = err.Error()
-			_ = s.store.FinishReconciliationRun(ctx, run)
-			return ReconciliationResult{}, err
+			return ReconciliationResult{}, s.failRun(ctx, run, err)
 		}
 		run.Stats["repaired_accounts"] = repaired
 	}
 
 	run.Status = "completed"
-	if err := s.store.FinishReconciliationRun(ctx, run); err != nil {
+	if err := s.finishRun(ctx, &run); err != nil {
 		return ReconciliationResult{}, err
 	}
 	s.publishReconciliationMetrics(stats)
 	return ReconciliationResult{Run: run, Discrepancies: discrepancies}, nil
+}
+
+func (s *Service) finishRun(ctx context.Context, run *reconciliation.Run) error {
+	finishedAt, err := s.store.FinishReconciliationRun(ctx, *run)
+	if err != nil {
+		return err
+	}
+	run.FinishedAt = &finishedAt
+	return nil
+}
+
+func (s *Service) failRun(ctx context.Context, run reconciliation.Run, cause error) error {
+	if err := s.finishRun(ctx, &run); err != nil {
+		s.logger.Error("could not finish failed reconciliation run", "run_id", run.ID.String(), "err", err)
+		return errors.Join(cause, err)
+	}
+	return cause
+}
+
+func (s *Service) setStatementTimeout(ctx context.Context, tx pgx.Tx) error {
+	timeout := s.reconciliationTimeout
+	if timeout <= 0 {
+		timeout = 5 * time.Minute
+	}
+	_, err := tx.Exec(ctx, `SELECT set_config('statement_timeout', $1, true)`, strconv.FormatInt(timeout.Milliseconds(), 10))
+	return err
 }
 
 func (s *Service) runChecks(ctx context.Context) ([]reconciliation.Discrepancy, int64, map[string]any, error) {
@@ -97,6 +122,9 @@ func (s *Service) runChecks(ctx context.Context) ([]reconciliation.Discrepancy, 
 		return nil, 0, nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := s.setStatementTimeout(ctx, tx); err != nil {
+		return nil, 0, nil, err
+	}
 
 	checked, err := s.store.CountAccounts(ctx, tx)
 	if err != nil {
@@ -140,7 +168,7 @@ func (s *Service) runChecks(ctx context.Context) ([]reconciliation.Discrepancy, 
 	for k, v := range counts {
 		byKind[k] = v
 	}
-	pending, oldestAge, err := s.store.OutboxStats(ctx)
+	pending, oldestAge, err := s.store.OutboxStats(ctx, s.pool)
 	if err != nil {
 		return nil, 0, nil, err
 	}
@@ -164,6 +192,9 @@ func (s *Service) repairAccounts(ctx context.Context, discrepancies []reconcilia
 	for id := range ids {
 		changed := false
 		err := pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}, func(tx pgx.Tx) error {
+			if err := s.setStatementTimeout(ctx, tx); err != nil {
+				return err
+			}
 			r, err := s.store.RepairAccount(ctx, tx, id)
 			if err != nil {
 				return err

@@ -77,8 +77,8 @@ func (s *Service) CreateHold(ctx context.Context, in CreateHoldInput) (HoldView,
 			if a.OwnerID != in.OwnerID {
 				return idempotency.Result{}, domain.NotFound("account %s", in.AccountID)
 			}
-			if !a.Spendable() {
-				return idempotency.Result{}, &domain.Error{Code: domain.CodeAccountNotActive, Message: "account is not active", Err: domain.ErrAccountNotActive}
+			if a.Status != domain.AccountActive {
+				return idempotency.Result{}, accountStatusError(a, "source")
 			}
 			if a.Currency != currency {
 				return idempotency.Result{}, &domain.Error{Code: domain.CodeCurrencyMismatch, Message: fmt.Sprintf("account uses %s", a.Currency), Err: domain.ErrCurrencyMismatch}
@@ -171,8 +171,11 @@ func (s *Service) CaptureHold(ctx context.Context, in CaptureHoldInput) (HoldVie
 			}
 			source := locked[hold.AccountID]
 			destination := locked[in.DestinationAccountID]
-			if !source.account.Spendable() || destination.account.Status != domain.AccountActive {
-				return idempotency.Result{}, &domain.Error{Code: domain.CodeAccountNotActive, Message: "account is not active", Err: domain.ErrAccountNotActive}
+			if source.account.Status == domain.AccountClosed {
+				return idempotency.Result{}, accountStatusError(source.account, "source")
+			}
+			if destination.account.Status != domain.AccountActive {
+				return idempotency.Result{}, accountStatusError(destination.account, "destination")
 			}
 			if source.account.Currency != hold.Currency || destination.account.Currency != hold.Currency {
 				return idempotency.Result{}, &domain.Error{Code: domain.CodeCurrencyMismatch, Message: fmt.Sprintf("accounts must use %s", hold.Currency), Err: domain.ErrCurrencyMismatch}

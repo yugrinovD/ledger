@@ -15,7 +15,12 @@ instead of a public issue.
 - SQL is parameterized; the service does not build SQL from user input.
 - The API and worker containers run as a non-root distroless user. The local-only
   `ledgerctl`/k6 tool containers run as root so they can write mounted demo files.
-- The admin port (metrics, pprof) is separate from the public API port.
+- The admin port is separate from the public API port. Reconciliation and
+  account/key administration require `LEDGER_ADMIN_TOKEN`.
+- The production config fails fast if `LEDGER_AUTH_PEPPER` or
+  `LEDGER_ADMIN_TOKEN` is the development default or shorter than 32 characters.
+- `X-Forwarded-For` is trusted only when the immediate peer is in
+  `LEDGER_TRUSTED_PROXIES`; otherwise it is ignored.
 - Request bodies are size-limited, unknown JSON fields are rejected.
 - Journal entries are immutable at the database level.
 - Secrets are read from the environment and are not logged.
@@ -27,3 +32,6 @@ instead of a public issue.
 - Replace the demo API-key model with OAuth2/mTLS or your platform's identity.
 - Review the single-relay outbox design for your throughput and ordering needs.
 - Add backups, PITR, and a tested disaster recovery plan.
+- Tune retention jobs and verify that processed-event retention is longer than
+  your Kafka topic retention.
+- Keep the admin port on a private network and rotate the admin token.

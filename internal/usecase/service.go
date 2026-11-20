@@ -22,24 +22,32 @@ import (
 const DefaultHoldTTL = 15 * time.Minute
 
 type Service struct {
-	store   *postgres.Store
-	pool    *pgxpool.Pool
-	idem    *idempotency.Executor
-	metrics *observability.Metrics
-	logger  *slog.Logger
-	now     func() time.Time
-	tracer  trace.Tracer
+	store                 *postgres.Store
+	pool                  *pgxpool.Pool
+	idem                  *idempotency.Executor
+	metrics               *observability.Metrics
+	logger                *slog.Logger
+	now                   func() time.Time
+	tracer                trace.Tracer
+	reconciliationTimeout time.Duration
 }
 
 func New(store *postgres.Store, pool *pgxpool.Pool, idem *idempotency.Executor, metrics *observability.Metrics, logger *slog.Logger) *Service {
 	return &Service{
-		store:   store,
-		pool:    pool,
-		idem:    idem,
-		metrics: metrics,
-		logger:  logger,
-		now:     func() time.Time { return time.Now().UTC() },
-		tracer:  otelTracer(),
+		store:                 store,
+		pool:                  pool,
+		idem:                  idem,
+		metrics:               metrics,
+		logger:                logger,
+		now:                   func() time.Time { return time.Now().UTC() },
+		tracer:                otelTracer(),
+		reconciliationTimeout: 5 * time.Minute,
+	}
+}
+
+func (s *Service) SetReconciliationTimeout(d time.Duration) {
+	if d > 0 {
+		s.reconciliationTimeout = d
 	}
 }
 
@@ -155,6 +163,17 @@ func marshal(v any) ([]byte, error) {
 		return nil, fmt.Errorf("marshal response: %w", err)
 	}
 	return b, nil
+}
+
+func accountStatusError(a domain.Account, role string) error {
+	switch a.Status {
+	case domain.AccountFrozen:
+		return &domain.Error{Code: domain.CodeAccountNotActive, Message: role + " account is frozen", Err: domain.ErrAccountFrozen}
+	case domain.AccountClosed:
+		return &domain.Error{Code: domain.CodeAccountNotActive, Message: role + " account is closed", Err: domain.ErrAccountNotActive}
+	default:
+		return &domain.Error{Code: domain.CodeAccountNotActive, Message: role + " account is not active", Err: domain.ErrAccountNotActive}
+	}
 }
 
 func (s *Service) Logger() *slog.Logger { return s.logger }

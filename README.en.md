@@ -17,8 +17,12 @@ short English overview for reviewers.
 - Pessimistic row locks in deterministic UUID order, retries on deadlocks and
   serialization failures, `READ COMMITTED` for money paths.
 - Holds with capture, release and expiry; same-currency transfers (no FX).
-- Independent reconciliation that detects projection drift and repairs derived
-  balances without touching the journal.
+- Independent reconciliation, admin-only and protected by `LEDGER_ADMIN_TOKEN`,
+  that detects drift and repairs derived balances without touching the journal.
+- Strict per-aggregate outbox ordering; relay leadership uses the same DB
+  connection for its advisory lock and every outbox query.
+- Retention jobs for published outbox, processed/audit events and reconciliation
+  history; freeze/unfreeze/close accounts and revoke API keys via admin CLI/API.
 - API keys, rate limiting, OpenAPI, migrations, CLI, metrics, structured logs,
   OTLP traces, pprof, Docker Compose, Grafana dashboards and k6 scenarios.
 
@@ -47,7 +51,9 @@ make demo      # transfer, exact duplicate, replay header, reconciliation
 ```
 
 If ports 8080/9090 are busy, set `LEDGER_API_PORT`, `LEDGER_API_ADMIN_PORT`,
-`LEDGER_API_URL`, `LEDGER_ADMIN_URL` in `.env`.
+`LEDGER_API_URL`, `LEDGER_ADMIN_URL` in `.env`. Operational reconciliation and
+account/key administration live on the admin port and require
+`LEDGER_ADMIN_TOKEN`.
 
 ## Failure semantics
 
@@ -83,7 +89,7 @@ the expected per-account lock serialisation. Full data:
 
 - [Full README (Russian)](README.md)
 - [5 ADRs](docs/adr)
-- [OpenAPI 3.1](api/openapi.yaml)
+- [OpenAPI 3.1](api/openapi.yaml) and [Admin OpenAPI](api/admin.openapi.yaml)
 - [Benchmarks and EXPLAIN plans](docs/benchmarks)
 - [Security notes](SECURITY.md)
 

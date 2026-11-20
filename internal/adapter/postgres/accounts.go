@@ -161,11 +161,14 @@ func mapAccountWriteError(err error) error {
 	}
 }
 
-func (s *Store) GetAccountByOwnerName(ctx context.Context, ownerID, name string) (domain.Account, error) {
-	row := s.pool.QueryRow(ctx, `SELECT `+accountColumns+` FROM accounts a WHERE a.owner_id = $1 AND a.name = $2 AND a.status <> 'closed' LIMIT 1`, ownerID, name)
+func (s *Store) SetAccountStatusTx(ctx context.Context, tx pgx.Tx, id uuid.UUID, status domain.AccountStatus) (domain.Account, error) {
+	row := tx.QueryRow(ctx, `
+		UPDATE accounts a SET status = $2, updated_at = now()
+		WHERE a.id = $1
+		RETURNING `+accountColumns, id, status)
 	a, err := scanAccount(row)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return domain.Account{}, domain.NotFound("account %s/%s", ownerID, name)
+		return domain.Account{}, domain.NotFound("account %s", id)
 	}
 	return a, err
 }

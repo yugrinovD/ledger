@@ -7,6 +7,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/yugrinovD/ledger/internal/domain"
 )
 
 type APIKey struct {
@@ -34,4 +36,17 @@ func (s *Store) FindAPIKey(ctx context.Context, hash []byte) (APIKey, error) {
 		return APIKey{}, pgx.ErrNoRows
 	}
 	return k, err
+}
+
+func (s *Store) RevokeAPIKey(ctx context.Context, id uuid.UUID) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE api_keys SET revoked_at = now()
+		WHERE id = $1 AND revoked_at IS NULL`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return domain.NotFound("api key %s", id)
+	}
+	return nil
 }

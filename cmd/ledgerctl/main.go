@@ -46,6 +46,7 @@ func rootCmd() *cobra.Command {
 		versionCmd(),
 		migrateCmd(),
 		apiKeyCmd(),
+		apiKeyRevokeCmd(),
 		accountCmd(),
 		transferCmd(),
 		holdCmd(),
@@ -85,6 +86,7 @@ func newApp() (*appContext, error) {
 	metrics := observability.NewMetrics(prometheus.NewRegistry())
 	idem := idempotency.NewExecutor(pool, store, cfg.IdempotencyTTL, nil, nil)
 	svc := usecase.New(store, pool, idem, metrics, logger)
+	svc.SetReconciliationTimeout(cfg.ReconciliationStatementTimeout)
 	return &appContext{cfg: cfg, store: store, svc: svc, poolCloser: pool.Close}, nil
 }
 
@@ -121,6 +123,33 @@ func migrateCmd() *cobra.Command {
 			return postgres.Migrate(cmd.Context(), cfg.DatabaseURL, direction)
 		},
 	}
+	return cmd
+}
+
+func apiKeyRevokeCmd() *cobra.Command {
+	var idRaw string
+	cmd := &cobra.Command{
+		Use:   "apikey-revoke",
+		Short: "Revoke an API key",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp()
+			if err != nil {
+				return err
+			}
+			defer app.Close()
+			id, err := uuid.Parse(idRaw)
+			if err != nil {
+				return fmt.Errorf("invalid key id: %w", err)
+			}
+			if err := app.svc.RevokeAPIKey(cmd.Context(), id); err != nil {
+				return err
+			}
+			fmt.Printf("revoked api key %s\n", id)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&idRaw, "id", "", "api key id")
+	_ = cmd.MarkFlagRequired("id")
 	return cmd
 }
 
@@ -226,7 +255,45 @@ func accountCmd() *cobra.Command {
 	balance.Flags().StringVar(&accountID, "account", "", "account id")
 	_ = balance.MarkFlagRequired("owner")
 	_ = balance.MarkFlagRequired("account")
-	cmd.AddCommand(create, balance)
+	statusCmd := func(name, short string, action func(context.Context, *appContext, uuid.UUID) (usecase.AccountView, error)) *cobra.Command {
+		var account string
+		cmd := &cobra.Command{
+			Use:   name,
+			Short: short,
+			RunE: func(cmd *cobra.Command, args []string) error {
+				app, err := newApp()
+				if err != nil {
+					return err
+				}
+				defer app.Close()
+				id, err := uuid.Parse(account)
+				if err != nil {
+					return fmt.Errorf("invalid account id: %w", err)
+				}
+				view, err := action(cmd.Context(), app, id)
+				if err != nil {
+					return err
+				}
+				return printJSON(view)
+			},
+		}
+		cmd.Flags().StringVar(&account, "account", "", "account id")
+		_ = cmd.MarkFlagRequired("account")
+		return cmd
+	}
+	cmd.AddCommand(
+		create,
+		balance,
+		statusCmd("freeze", "Freeze an account", func(ctx context.Context, app *appContext, id uuid.UUID) (usecase.AccountView, error) {
+			return app.svc.FreezeAccount(ctx, id)
+		}),
+		statusCmd("unfreeze", "Unfreeze an account", func(ctx context.Context, app *appContext, id uuid.UUID) (usecase.AccountView, error) {
+			return app.svc.UnfreezeAccount(ctx, id)
+		}),
+		statusCmd("close", "Close an account with zero balance and no holds", func(ctx context.Context, app *appContext, id uuid.UUID) (usecase.AccountView, error) {
+			return app.svc.CloseAccount(ctx, id)
+		}),
+	)
 	return cmd
 }
 
@@ -434,7 +501,7 @@ func outboxCmd() *cobra.Command {
 				return err
 			}
 			defer app.Close()
-			pending, oldest, err := app.store.OutboxStats(cmd.Context())
+			pending, oldest, err := app.store.OutboxStats(cmd.Context(), app.store.Pool())
 			if err != nil {
 				return err
 			}

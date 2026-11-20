@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -270,6 +271,43 @@ type discrepancyView struct {
 	Details       map[string]any `json:"details,omitempty"`
 }
 
+func (h *Handlers) FreezeAccount(w http.ResponseWriter, r *http.Request) {
+	h.accountStatusAction(w, r, h.svc.FreezeAccount)
+}
+
+func (h *Handlers) UnfreezeAccount(w http.ResponseWriter, r *http.Request) {
+	h.accountStatusAction(w, r, h.svc.UnfreezeAccount)
+}
+
+func (h *Handlers) CloseAccount(w http.ResponseWriter, r *http.Request) {
+	h.accountStatusAction(w, r, h.svc.CloseAccount)
+}
+
+func (h *Handlers) accountStatusAction(w http.ResponseWriter, r *http.Request, action func(context.Context, uuid.UUID) (usecase.AccountView, error)) {
+	id, ok := h.pathUUID(w, r, "accountID")
+	if !ok {
+		return
+	}
+	view, err := action(r.Context(), id)
+	if err != nil {
+		writeProblem(w, r, h.logger(), err)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
+func (h *Handlers) RevokeAPIKey(w http.ResponseWriter, r *http.Request) {
+	id, ok := h.pathUUID(w, r, "keyID")
+	if !ok {
+		return
+	}
+	if err := h.svc.RevokeAPIKey(r.Context(), id); err != nil {
+		writeProblem(w, r, h.logger(), err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (h *Handlers) ListReconciliationRuns(w http.ResponseWriter, r *http.Request) {
 	limit := 20
 	if raw := r.URL.Query().Get("limit"); raw != "" {
@@ -313,6 +351,7 @@ func (h *Handlers) GetReconciliationRun(w http.ResponseWriter, r *http.Request) 
 			ID: run.ID.String(), Status: run.Status, StartedAt: run.StartedAt, FinishedAt: run.FinishedAt,
 			CheckedAccounts: run.CheckedAccounts, DiscrepancyCount: run.DiscrepancyCount, Error: run.Error, Stats: run.Stats,
 		},
+		Discrepancies: make([]discrepancyView, 0, len(items)),
 	}
 	for _, d := range items {
 		out.Discrepancies = append(out.Discrepancies, discrepancyToView(d))
@@ -335,6 +374,9 @@ func discrepancyToView(d reconciliation.Discrepancy) discrepancyView {
 
 func (h *Handlers) pathUUID(w http.ResponseWriter, r *http.Request, name string) (uuid.UUID, bool) {
 	raw := chi.URLParam(r, name)
+	if raw == "" {
+		raw = r.PathValue(name)
+	}
 	id, err := uuid.Parse(raw)
 	if err != nil {
 		writeProblem(w, r, h.logger(), domain.Validation("invalid %s", name))

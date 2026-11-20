@@ -41,6 +41,9 @@ func run() error {
 		return fmt.Errorf("load config: %w", err)
 	}
 	logger := observability.NewLogger(cfg.LogLevel)
+	for _, warning := range cfg.Warnings() {
+		logger.Warn(warning)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -74,6 +77,7 @@ func run() error {
 		func(int, error) { metrics.TxRetries.Inc() },
 	)
 	svc := usecase.New(store, pool, idem, metrics, logger)
+	svc.SetReconciliationTimeout(cfg.ReconciliationStatementTimeout)
 
 	producer, err := kafka.NewProducer(cfg.KafkaBrokers, cfg.KafkaClientID)
 	if err != nil {
@@ -112,6 +116,7 @@ func run() error {
 	g.Go(func() error { return runHoldSweeper(gctx, svc, logger, cfg.HoldSweepInterval) })
 	g.Go(func() error { return runReconciler(gctx, svc, logger, cfg.ReconciliationInterval) })
 	g.Go(func() error { return runIdempotencyCleanup(gctx, store, logger) })
+	g.Go(func() error { return runRetention(gctx, store, cfg, logger, metrics) })
 
 	admin := &http.Server{
 		Addr:              cfg.AdminAddr,
@@ -201,6 +206,61 @@ func runIdempotencyCleanup(ctx context.Context, store *postgres.Store, logger *s
 			if total > 0 {
 				logger.Info("deleted expired idempotency keys", "count", total)
 			}
+		}
+	}
+}
+
+func runRetention(ctx context.Context, store *postgres.Store, cfg config.Config, logger *slog.Logger, metrics *observability.Metrics) error {
+	type job struct {
+		table  string
+		retain time.Duration
+		del    func(context.Context, time.Time, int) (int64, error)
+	}
+	jobs := []job{
+		{"outbox", cfg.OutboxRetention, store.DeletePublishedOutboxBefore},
+		{"processed_events", cfg.ProcessedEventsRetention, store.DeleteProcessedEventsBefore},
+		{"audit_events", cfg.AuditRetention, store.DeleteAuditEventsBefore},
+		{"reconciliation_runs", cfg.ReconciliationRetention, store.DeleteReconciliationRunsBefore},
+	}
+	run := func() {
+		for _, j := range jobs {
+			cutoff := time.Now().UTC().Add(-j.retain)
+			var total int64
+			for {
+				n, err := j.del(ctx, cutoff, 1000)
+				if err != nil {
+					logger.Error("retention delete failed", "table", j.table, "err", err)
+					break
+				}
+				total += n
+				if n == 0 {
+					break
+				}
+			}
+			if total > 0 {
+				metrics.RetentionDeleted.WithLabelValues(j.table).Add(float64(total))
+				logger.Info("retention deleted rows", "table", j.table, "count", total)
+			}
+		}
+		names := make([]string, 0, len(jobs))
+		for _, j := range jobs {
+			names = append(names, j.table)
+		}
+		if rows, err := store.EstimatedTableRows(ctx, names); err == nil {
+			for table, count := range rows {
+				metrics.TableEstimatedRows.WithLabelValues(table).Set(float64(count))
+			}
+		}
+	}
+	run()
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			run()
 		}
 	}
 }

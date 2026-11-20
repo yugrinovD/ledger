@@ -17,7 +17,6 @@ tags:
   - name: accounts
   - name: transfers
   - name: holds
-  - name: reconciliation
 paths:
   /v1/accounts:
     post:
@@ -248,55 +247,6 @@ paths:
                 $ref: '#/components/schemas/Hold'
         '409':
           $ref: '#/components/responses/Conflict'
-  /v1/reconciliation/runs:
-    get:
-      tags: [reconciliation]
-      summary: List reconciliation runs
-      operationId: listReconciliationRuns
-      parameters:
-        - name: limit
-          in: query
-          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
-      responses:
-        '200':
-          description: Runs
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [runs]
-                properties:
-                  runs:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/ReconciliationRun'
-  /v1/reconciliation/runs/{runID}:
-    get:
-      tags: [reconciliation]
-      summary: Get a reconciliation run with discrepancies
-      operationId: getReconciliationRun
-      parameters:
-        - name: runID
-          in: path
-          required: true
-          schema: { type: string, format: uuid }
-      responses:
-        '200':
-          description: Run and discrepancies
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [run, discrepancies]
-                properties:
-                  run:
-                    $ref: '#/components/schemas/ReconciliationRun'
-                  discrepancies:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/Discrepancy'
-        '404':
-          $ref: '#/components/responses/NotFound'
 components:
   securitySchemes:
     bearerAuth:
@@ -380,6 +330,7 @@ components:
         amount:
           type: string
           pattern: '^[0-9]+(\.[0-9]{1,3})?$'
+          description: 'Decimal string; fractional digits are limited by the currency scale (JPY=0, USD=2, KWD=3).'
           example: '10.50'
         currency: { type: string, pattern: '^[A-Za-z]{3}$' }
         description: { type: string, maxLength: 500 }
@@ -401,8 +352,11 @@ components:
       required: [account_id, amount, currency]
       properties:
         account_id: { type: string, format: uuid }
-        amount: { type: string }
-        currency: { type: string }
+        amount:
+          type: string
+          pattern: '^[0-9]+(\.[0-9]{1,3})?$'
+          description: 'Decimal string; fractional digits are limited by the currency scale (JPY=0, USD=2, KWD=3).'
+        currency: { type: string, pattern: '^[A-Za-z]{3}$' }
         expires_at: { type: string, format: date-time }
     CaptureHoldRequest:
       type: object
@@ -441,28 +395,6 @@ components:
             $ref: '#/components/schemas/Entry'
         next_cursor: { type: string }
         has_more: { type: boolean }
-    ReconciliationRun:
-      type: object
-      required: [id, status, started_at, checked_accounts, discrepancy_count, stats]
-      properties:
-        id: { type: string, format: uuid }
-        status: { type: string, enum: [running, completed, failed] }
-        started_at: { type: string, format: date-time }
-        finished_at: { type: string, format: date-time }
-        checked_accounts: { type: integer, format: int64 }
-        discrepancy_count: { type: integer, format: int64 }
-        error: { type: string }
-        stats: { type: object, additionalProperties: true }
-    Discrepancy:
-      type: object
-      required: [kind]
-      properties:
-        kind: { type: string }
-        account_id: { type: string, format: uuid }
-        transaction_id: { type: string, format: uuid }
-        expected: { type: integer, format: int64 }
-        actual: { type: integer, format: int64 }
-        details: { type: object, additionalProperties: true }
     Problem:
       type: object
       required: [type, title, status, detail]

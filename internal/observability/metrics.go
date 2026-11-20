@@ -27,6 +27,9 @@ type Metrics struct {
 
 	ReconciliationDiscrepancies *prometheus.GaugeVec
 	HoldsExpired                prometheus.Counter
+
+	RetentionDeleted   *prometheus.CounterVec
+	TableEstimatedRows *prometheus.GaugeVec
 }
 
 func NewMetrics(reg prometheus.Registerer) *Metrics {
@@ -106,6 +109,16 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Name:      "holds_expired_total",
 			Help:      "Holds released by the expiry worker.",
 		}),
+		RetentionDeleted: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: Namespace,
+			Name:      "retention_deleted_rows_total",
+			Help:      "Rows deleted by retention jobs.",
+		}, []string{"table"}),
+		TableEstimatedRows: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: Namespace,
+			Name:      "table_estimated_rows",
+			Help:      "Estimated table row counts from pg_class.reltuples.",
+		}, []string{"table"}),
 	}
 
 	reg.MustRegister(
@@ -115,6 +128,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		m.OutboxPublished, m.OutboxFailures, m.OutboxPending, m.OutboxOldestAge,
 		m.ConsumerProcessed,
 		m.ReconciliationDiscrepancies, m.HoldsExpired,
+		m.RetentionDeleted, m.TableEstimatedRows,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)

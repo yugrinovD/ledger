@@ -9,7 +9,7 @@
 **Идемпотентный double-entry ledger с outbox, reconciliation и наблюдаемостью.**
 Go + PostgreSQL + Redpanda (Kafka API) + Redis + Docker + Prometheus/Grafana + Jaeger + k6.
 
-[English summary](README.en.md) · [ADRs](docs/adr) · [Benchmarks](docs/benchmarks) · [OpenAPI](api/openapi.yaml)
+[English summary](README.en.md) · [ADRs](docs/adr) · [Benchmarks](docs/benchmarks) · [OpenAPI](api/openapi.yaml) · [Admin OpenAPI](api/admin.openapi.yaml)
 
 ---
 
@@ -72,6 +72,7 @@ make demo      # перевод, повтор с тем же ключом, repla
 | Что | URL |
 |---|---|
 | API | http://localhost:8080 |
+| Admin API (reconciliation, freeze/revoke) | http://localhost:9090/admin/... |
 | readiness/metrics/pprof | http://localhost:9090/readyz, `/metrics`, `/debug/pprof/` |
 | Grafana (admin/admin или анонимно) | http://localhost:3000 |
 | Prometheus | http://localhost:9095 |
@@ -88,6 +89,10 @@ LEDGER_ADMIN_URL=http://localhost:19090
 ```
 
 Compose и demo-скрипты подхватят эти значения.
+
+Операционные endpoints требуют `LEDGER_ADMIN_TOKEN` (в dev по умолчанию
+`dev-admin-token-change-me`). Он не принимается на публичном API-порту и не
+выдаётся tenant-ключам.
 
 ### Демо-сценарии
 
@@ -139,11 +144,30 @@ curl -sS http://localhost:8080/v1/accounts/$DEST/balance \
 | POST | `/v1/holds` | резерв |
 | POST | `/v1/holds/{id}/capture` | списать резерв получателю |
 | POST | `/v1/holds/{id}/release` | освободить резерв |
-| GET | `/v1/reconciliation/runs` | история сверок |
-| GET | `/v1/reconciliation/runs/{id}` | сверка + расхождения |
-
 Суммы передаются строками (`"10.50"`), никогда не float. Валюта счёта
 фиксирована; перевод между разными валютами отклоняется (FX вне scope).
+
+### Admin API
+
+Reconciliation затрагивает весь ledger, поэтому вынесен с публичного API на
+admin-порт и защищён отдельным токеном. Спецификация: [`api/admin.openapi.yaml`](api/admin.openapi.yaml).
+
+| Метод | Путь | Назначение |
+|---|---|---|
+| GET | `/admin/reconciliation/runs` | история сверок |
+| GET | `/admin/reconciliation/runs/{id}` | сверка + расхождения |
+| POST | `/admin/accounts/{id}/freeze` | заморозить счёт |
+| POST | `/admin/accounts/{id}/unfreeze` | разморозить счёт |
+| POST | `/admin/accounts/{id}/close` | закрыть счёт с нулевым балансом |
+| POST | `/admin/api-keys/{id}/revoke` | отозвать API key |
+
+```bash
+curl -sS http://localhost:9090/admin/reconciliation/runs \
+  -H "Authorization: Bearer ${LEDGER_ADMIN_TOKEN:-dev-admin-token-change-me}" | jq .
+
+docker compose --profile tools run --rm ledgerctl apikey-revoke --id <key-id>
+docker compose --profile tools run --rm ledgerctl account freeze --account <account-id>
+```
 
 ## Модель данных и double-entry
 
@@ -214,7 +238,10 @@ sequenceDiagram
 - тот же ключ с другим телом → `409 idempotency_key_reuse`;
 - доменные 4xx не кэшируются: после пополнения счёта тот же запрос можно повторить.
 
-Скоуп ключа — `(owner_id, key)`, TTL 24 часа.
+Скоуп ключа — `(owner_id, key)`, TTL 24 часа. TTL применяется атомарно:
+`AcquireIdempotency` под блокировкой заменяет просроченную строку, поэтому
+cleanup не может привести к ложному 404. Для transfer/hold остаётся постоянный
+unique-ключ: очень поздний retry после TTL получит 409, а не создаст дубль.
 
 ## Outbox и exactly-once
 
@@ -249,7 +276,11 @@ consumer = exactly-once effect**, а не «exactly-once delivery».
 
 Relay публикует батчи (по умолчанию 1000 событий / 100 мс) и отмечает их одним
 `UPDATE ... WHERE id = ANY($1)`. Один активный relay выбирается через PostgreSQL
-advisory lock; второй worker находится в standby и подхватывает лидерство.
+advisory lock на том же соединении, через которое идут все outbox-запросы:
+если соединение умерло, lock освобождается, и старый лидер больше не публикует.
+Строгий per-aggregate order обеспечивается запросом с `NOT EXISTS` более раннего
+неопубликованного события; более поздние события агрегата ждут. Второй worker
+находится в standby и подхватывает лидерство.
 
 ## Конкурентность, изоляция, deadlock
 
@@ -279,7 +310,9 @@ advisory lock; второй worker находится в standby и подхва
 
 ## Reconciliation
 
-Фоновая джоба и CLI под `pg_try_advisory_lock`:
+Reconciliation — операционная функция администратора: публичного API для неё
+нет, только admin-порт с `LEDGER_ADMIN_TOKEN` и CLI. Джоба работает под
+`pg_try_advisory_lock`:
 
 1. `sum(journal_entries)` = `account_balances.balance_minor`;
 2. `sum(active holds)` = `held_minor`;
@@ -302,13 +335,17 @@ docker compose --profile tools run --rm ledgerctl reconcile --repair
 
 - **Метрики**: HTTP RED, transfers by status, idempotency replays, outbox
   pending/lag/failures, consumer events, tx retries, holds expired,
-  reconciliation discrepancies, Go runtime/process.
+  reconciliation discrepancies, retention deletes, estimated table rows,
+  Go runtime/process.
 - **Трейсы**: OTel → Jaeger. `traceparent` кладётся в headers outbox-события,
   поэтому один трейс покрывает `HTTP → usecase → outbox → Kafka → consumer`.
 - **Логи**: JSON `slog`, `request_id`, `trace_id`, `owner_id`, без секретов и PII.
 - **pprof**: admin-порт, включается `LEDGER_PROFILING=true` (по умолчанию выключен; `LEDGER_PROFILING=true make up`).
 - **Алерты**: outbox backlog/lag, 5xx > 1%, p99 > 500 мс, discrepancy > 0,
   высокий retry rate.
+- **Retention**: published outbox — 7 дней, processed/audit/reconciliation —
+  30 дней; настройки через `LEDGER_*_RETENTION`. Это не заменяет
+  партиционирование больших журналов.
 
 Проверка:
 
@@ -326,13 +363,13 @@ go tool pprof http://localhost:9090/debug/pprof/profile?seconds=30
 
 | Сценарий | Rate | p95 | p99 | Ошибки |
 |---|---:|---:|---:|---:|
-| steady transfer | 200 req/s | 2.36 ms | 4.51 ms | 0 |
-| steady transfer | 500 req/s | 2.60 ms | 4.61 ms | 0 |
-| steady transfer | 1000 req/s | 3.38 ms | 10.57 ms | 0 |
-| steady transfer | 2000 req/s | 5.31 ms | 19.06 ms | 0 |
-| duplicates (3× один ключ) | 100 iter/s | 2.58 ms | 4.82 ms | 0 |
-| reads | 1000 req/s | 0.67 ms | 0.84 ms | 0 |
-| saturation target | 4000 req/s | 751 ms | 807 ms | 0, но rate не достигнут |
+| steady transfer | 200 req/s | 2.50 ms | 3.59 ms | 0 |
+| steady transfer | 500 req/s | 2.57 ms | 4.60 ms | 0 |
+| steady transfer | 1000 req/s | 3.71 ms | 16.60 ms | 0 |
+| steady transfer | 2000 req/s | 5.81 ms | 20.46 ms | 0 |
+| duplicates (3× один ключ) | 100 iter/s | 2.43 ms | 3.35 ms | 0 |
+| reads | 1000 req/s | 0.74 ms | 0.97 ms | 0 |
+| saturation target | 4000 req/s | 737 ms | 818 ms | 0, но rate не достигнут |
 
 После серии прогонов `make reconcile` даёт `discrepancy_count = 0`.
 
@@ -341,8 +378,10 @@ go tool pprof http://localhost:9090/debug/pprof/profile?seconds=30
 - горячие счёты — это предел per-account throughput; 5 счетов при 500 req/s
   дают p99 173 мс, 200 счетов — 4.61 мс;
 - outbox relay изначально отставал (57 955 pending после серии нагрузок);
-  батчирование публикации и batch-update снизили backlog до 0 и ускорили drain
-  до ~5 секунд.
+  батчирование публикации и batch-update снизили backlog до 0. После добавления
+  строгого per-aggregate order при 1000 req/s наблюдался кратковременный backlog
+  (~973 события), который дренировался менее чем за 10 секунд; после серии
+  прогонов pending = 0.
 
 ## EXPLAIN и индексы
 
@@ -386,12 +425,15 @@ make cover
 - конкурентные дубли одного `Idempotency-Key` (25 goroutines → 1 перевод);
 - конкурентные списания (10×60 при балансе 100 → ровно одно успешное);
 - встречные переводы A→B/B→A без deadlock;
-- hold lifecycle и capture/release;
+- hold lifecycle, expiry и гонка capture/expire;
 - несбалансированная journal-транзакция отклоняется БД;
 - `UPDATE`/`DELETE` journal entries запрещены;
 - reconciliation находит и чинит drift;
-- outbox retry, публикация батчем и consumer dedupe;
-- HTTP e2e: replay, 409 на другом теле, 422 insufficient funds, 401.
+- outbox retry, публикация батчем, per-aggregate order и потеря лидерства;
+- TTL/cleanup идемпотентности и retention;
+- admin-only reconciliation, 401/403, freeze/revoke, tenant isolation;
+- HTTP e2e: replay, 409 на другом теле, 422 insufficient funds, 401/403;
+- allow_negative, currency mismatch, frozen/closed account.
 
 CI: gofmt, vet, race-тесты, integration на PostgreSQL 17, OpenAPI validation,
 `golangci-lint`, `govulncheck`, docker build.
@@ -414,6 +456,7 @@ internal/domain    деньги, модели, ошибки, инвариант�
 internal/usecase   переводы, счета, holds, reconciliation
 internal/idempotency
 internal/outbox
+internal/db        common pgx Querier
 internal/adapter   postgres, kafka, redis/ratelimit, httpapi
 api/openapi.yaml
 migrations         goose, embedded
@@ -422,6 +465,23 @@ load               k6 scenarios
 docs               ADR, benchmarks, explain
 ```
 
+## Конфигурация и безопасность
+
+- `LEDGER_ENV=production` требует непустые не-default `LEDGER_AUTH_PEPPER` и
+  `LEDGER_ADMIN_TOKEN` длиной не менее 32 символов; иначе процесс не стартует.
+- Парсер env больше не подменяет неверные числа/длительности/bool на defaults:
+  конфигурация падает с понятной ошибкой.
+- `LEDGER_PREAUTH_RATE_LIMIT_RPM` ограничивает невалидные ключи по IP до auth;
+  owner-лимит применяется после auth.
+- `LEDGER_TRUSTED_PROXIES` — список CIDR. `X-Forwarded-For` учитывается только
+  если непосредственный peer входит в trusted proxy network.
+- `LEDGER_RECONCILIATION_STATEMENT_TIMEOUT` (5m) применяется через
+  `SET LOCAL statement_timeout` только к reconciliation-транзакциям.
+- `LEDGER_*_RETENTION` управляет TTL операционных таблиц; `processed_events`
+  retention должен быть не меньше retention Kafka-топика.
+- `LEDGER_ADMIN_TOKEN` не принимается на публичном API-порту; reconciliation и
+  freeze/revoke доступны только на admin-порту.
+
 ## Non-goals и roadmap
 
 Не входит в scope: FX/конвертация, карточные сети, PCI DSS, KYC/AML, UI,
@@ -429,7 +489,7 @@ Kubernetes, multi-region, полноценный identity-провайдер, pa
 
 Roadmap:
 
-- партиционирование outbox и журнала, архивирование;
+- партиционирование outbox и журнала, архивирование (TTL-джобы уже есть);
 - шардирование по счетам / более умное распределение горячих счетов;
 - partitioned relays для горизонтального масштабирования при сохранении порядка;
 - отдельные DB-роли migrator/app и RLS для мультитенантности;

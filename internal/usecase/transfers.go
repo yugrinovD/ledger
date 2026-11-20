@@ -85,11 +85,11 @@ func (s *Service) CreateTransfer(ctx context.Context, in CreateTransferInput) (T
 			if source.account.OwnerID != in.OwnerID {
 				return idempotency.Result{}, domain.NotFound("account %s", in.SourceAccountID)
 			}
-			if !source.account.Spendable() {
-				return idempotency.Result{}, &domain.Error{Code: domain.CodeAccountNotActive, Message: "source account is not active", Err: domain.ErrAccountNotActive}
+			if source.account.Status != domain.AccountActive {
+				return idempotency.Result{}, accountStatusError(source.account, "source")
 			}
 			if destination.account.Status != domain.AccountActive {
-				return idempotency.Result{}, &domain.Error{Code: domain.CodeAccountNotActive, Message: "destination account is not active", Err: domain.ErrAccountNotActive}
+				return idempotency.Result{}, accountStatusError(destination.account, "destination")
 			}
 			if source.account.Currency != currency || destination.account.Currency != currency {
 				return idempotency.Result{}, &domain.Error{Code: domain.CodeCurrencyMismatch, Message: fmt.Sprintf("accounts must use %s", currency), Err: domain.ErrCurrencyMismatch}

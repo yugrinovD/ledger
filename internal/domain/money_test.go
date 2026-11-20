@@ -13,8 +13,10 @@ func TestParseAmount(t *testing.T) {
 	}{
 		{"usd whole", "10", "USD", 1000, false},
 		{"usd decimals", "10.50", "USD", 1050, false},
-		{"usd leading dot", ".5", "USD", 50, false},
+		{"usd leading dot", ".5", "USD", 0, true},
 		{"usd zero", "0.00", "USD", 0, false},
+		{"usd trailing dot", "1.", "USD", 0, true},
+		{"usd dot only", ".", "USD", 0, true},
 		{"usd negative", "-1.25", "USD", -125, false},
 		{"jpy scale zero", "100", "JPY", 100, false},
 		{"jpy rejects decimals", "100.5", "JPY", 0, true},
@@ -52,6 +54,7 @@ func TestFormatAmount(t *testing.T) {
 		{-125, "USD", "-1.25"},
 		{100, "JPY", "100"},
 		{1234, "KWD", "1.234"},
+		{-9223372036854775808, "USD", "-92233720368547758.08"},
 	}
 	for _, tt := range tests {
 		if got := FormatAmount(tt.minor, tt.currency); got != tt.want {

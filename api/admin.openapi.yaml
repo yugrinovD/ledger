@@ -1,0 +1,206 @@
+openapi: 3.1.0
+info:
+  title: Ledger Admin API
+  version: 1.0.0
+  description: |
+    Operational endpoints exposed on the separate admin port. They require the
+    `LEDGER_ADMIN_TOKEN` bearer token and are never reachable with tenant API keys.
+servers:
+  - url: http://localhost:9090
+    description: Local Docker Compose admin port
+security:
+  - adminAuth: []
+tags:
+  - name: reconciliation
+  - name: accounts
+  - name: api-keys
+paths:
+  /admin/reconciliation/runs:
+    get:
+      tags: [reconciliation]
+      summary: List reconciliation runs
+      operationId: listReconciliationRuns
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        '200':
+          description: Runs
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [runs]
+                properties:
+                  runs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ReconciliationRun'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /admin/reconciliation/runs/{runID}:
+    get:
+      tags: [reconciliation]
+      summary: Get a reconciliation run with discrepancies
+      operationId: getReconciliationRun
+      parameters:
+        - name: runID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Run and discrepancies
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [run, discrepancies]
+                properties:
+                  run:
+                    $ref: '#/components/schemas/ReconciliationRun'
+                  discrepancies:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Discrepancy'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /admin/accounts/{accountID}/freeze:
+    post:
+      tags: [accounts]
+      summary: Freeze an account
+      operationId: freezeAccount
+      parameters:
+        - $ref: '#/components/parameters/AccountID'
+      responses:
+        '200':
+          description: Frozen account
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Account' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /admin/accounts/{accountID}/unfreeze:
+    post:
+      tags: [accounts]
+      summary: Unfreeze an account
+      operationId: unfreezeAccount
+      parameters:
+        - $ref: '#/components/parameters/AccountID'
+      responses:
+        '200':
+          description: Active account
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Account' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /admin/accounts/{accountID}/close:
+    post:
+      tags: [accounts]
+      summary: Close an account with zero balance and no active holds
+      operationId: closeAccount
+      parameters:
+        - $ref: '#/components/parameters/AccountID'
+      responses:
+        '200':
+          description: Closed account
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Account' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /admin/api-keys/{keyID}/revoke:
+    post:
+      tags: [api-keys]
+      summary: Revoke an API key
+      operationId: revokeAPIKey
+      parameters:
+        - $ref: '#/components/parameters/KeyID'
+      responses:
+        '204':
+          description: Revoked
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+components:
+  securitySchemes:
+    adminAuth:
+      type: http
+      scheme: bearer
+  parameters:
+    AccountID:
+      name: accountID
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    KeyID:
+      name: keyID
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+  schemas:
+    Account:
+      type: object
+      required: [id, owner_id, name, currency, type, status, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        owner_id: { type: string }
+        name: { type: string }
+        currency: { type: string }
+        type: { type: string }
+        status: { type: string }
+        created_at: { type: string, format: date-time }
+    ReconciliationRun:
+      type: object
+      required: [id, status, started_at, checked_accounts, discrepancy_count, stats]
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string, enum: [running, completed, failed] }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time }
+        checked_accounts: { type: integer, format: int64 }
+        discrepancy_count: { type: integer, format: int64 }
+        error: { type: string }
+        stats: { type: object, additionalProperties: true }
+    Discrepancy:
+      type: object
+      required: [kind]
+      properties:
+        kind: { type: string }
+        account_id: { type: string, format: uuid }
+        transaction_id: { type: string, format: uuid }
+        expected: { type: integer, format: int64 }
+        actual: { type: integer, format: int64 }
+        details: { type: object, additionalProperties: true }
+    Problem:
+      type: object
+      required: [type, title, status, detail]
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        code: { type: string }
+        request_id: { type: string }
+  responses:
+    Unauthorized:
+      description: Missing or invalid admin token
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: Resource not found
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Conflict:
+      description: Invalid account state transition
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }

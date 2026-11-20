@@ -23,8 +23,11 @@ Delivery is at-least-once:
   in the same transaction as the projection;
 - poison messages go to a dead-letter topic after bounded retries.
 
-A single active relay is elected with a PostgreSQL advisory lock. This keeps
-per-aggregate publication order simple. Horizontal relay scaling would require
+A single active relay is elected with a PostgreSQL advisory lock held on the
+same connection used for outbox SQL. If that connection dies, the lock is
+released and the relay stops publishing. The poll query refuses to return a
+later event while an earlier event for the same aggregate is still unpublished,
+so per-aggregate order survives retries. Horizontal relay scaling would require
 partitioned outbox ownership and is documented as a roadmap item.
 
 ## Consequences
@@ -33,8 +36,9 @@ partitioned outbox ownership and is documented as a roadmap item.
 - At-least-once delivery plus dedupe gives exactly-once **effect**, not
   exactly-once delivery. The README states this precisely.
 - Relay latency is bounded by the poll interval, not by the API request.
-- The outbox table and its pending partial index become hot under load; batch
-  polling and `published_at` cleanup are required in production.
+- The outbox table and its pending partial index become hot under load; the
+  worker keeps it bounded with a retention job for published rows, while
+  partitioning/archiving remains a future step.
 
 ## Alternatives considered
 

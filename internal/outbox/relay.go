@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/yugrinovD/ledger/internal/db"
 	"github.com/yugrinovD/ledger/internal/observability"
 )
 
@@ -23,10 +24,10 @@ type Publisher interface {
 }
 
 type RelayStore interface {
-	PollOutbox(ctx context.Context, limit int) ([]Event, error)
-	MarkOutboxPublishedBatch(ctx context.Context, ids []int64) error
-	MarkOutboxFailed(ctx context.Context, id int64, reason string, nextAttempt time.Duration) error
-	OutboxStats(ctx context.Context) (int64, float64, error)
+	PollOutbox(ctx context.Context, q db.Querier, limit int) ([]Event, error)
+	MarkOutboxPublishedBatch(ctx context.Context, q db.Querier, ids []int64) error
+	MarkOutboxFailed(ctx context.Context, q db.Querier, id int64, reason string, nextAttempt time.Duration) error
+	OutboxStats(ctx context.Context, q db.Querier) (int64, float64, error)
 }
 
 type Relay struct {
@@ -58,8 +59,9 @@ func NewRelay(pool *pgxpool.Pool, store RelayStore, publisher Publisher, topic s
 	}
 }
 
-// Run holds a PostgreSQL advisory lock so exactly one relay is active. A second
-// worker stays in standby and takes over automatically after the leader exits.
+// Run holds a PostgreSQL advisory lock so exactly one relay is active. The
+// leadership connection is also used for every outbox query: if the session
+// dies, the lock is released and the old leader can no longer publish.
 func (r *Relay) Run(ctx context.Context) error {
 	for {
 		if ctx.Err() != nil {
@@ -84,32 +86,48 @@ func (r *Relay) Run(ctx context.Context) error {
 		}
 
 		r.logger.Info("outbox relay acquired leadership")
-		ticker := time.NewTicker(r.interval)
-		for {
-			if _, err := r.RelayOnce(ctx); err != nil {
-				r.logger.Error("outbox relay iteration failed", "err", err)
-			}
-			select {
-			case <-ctx.Done():
-				ticker.Stop()
-				unlockCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-				_, _ = conn.Exec(unlockCtx, `SELECT pg_advisory_unlock(hashtext('ledger_outbox_relay'))`)
-				cancel()
-				conn.Release()
+		err = r.runLeadership(ctx, conn)
+		unlockCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		_, _ = conn.Exec(unlockCtx, `SELECT pg_advisory_unlock(hashtext('ledger_outbox_relay'))`)
+		cancel()
+		conn.Release()
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err != nil {
+			r.logger.Error("outbox relay lost leadership; retrying", "err", err)
+			if !sleep(ctx, time.Second) {
 				return nil
-			case <-ticker.C:
 			}
 		}
 	}
 }
 
-func (r *Relay) RelayOnce(ctx context.Context) (int, error) {
-	pending, oldest, err := r.store.OutboxStats(ctx)
+func (r *Relay) runLeadership(ctx context.Context, conn *pgxpool.Conn) error {
+	ticker := time.NewTicker(r.interval)
+	defer ticker.Stop()
+	for {
+		if _, err := r.RelayOnce(ctx, conn); err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+		}
+	}
+}
+
+func (r *Relay) RelayOnce(ctx context.Context, conn *pgxpool.Conn) (int, error) {
+	pending, oldest, err := r.store.OutboxStats(ctx, conn)
 	if err == nil {
 		r.metrics.OutboxPending.Set(float64(pending))
 		r.metrics.OutboxOldestAge.Set(oldest)
 	}
-	events, err := r.store.PollOutbox(ctx, r.batchSize)
+	events, err := r.store.PollOutbox(ctx, conn, r.batchSize)
 	if err != nil {
 		return 0, err
 	}
@@ -126,7 +144,7 @@ func (r *Relay) RelayOnce(ctx context.Context) (int, error) {
 		r.metrics.OutboxFailures.Add(float64(len(events)))
 		for _, e := range events {
 			backoff := r.backoff(e.Attempts)
-			if markErr := r.store.MarkOutboxFailed(ctx, e.ID, truncate(err.Error(), 1000), backoff); markErr != nil {
+			if markErr := r.store.MarkOutboxFailed(ctx, conn, e.ID, truncate(err.Error(), 1000), backoff); markErr != nil {
 				r.logger.Error("mark outbox failure", "event_id", e.EventID.String(), "err", markErr)
 			}
 			if e.Attempts+1 >= r.maxAttempts {
@@ -137,7 +155,7 @@ func (r *Relay) RelayOnce(ctx context.Context) (int, error) {
 		r.logger.Warn("outbox batch publish failed", "count", len(events), "err", err)
 		return 0, nil
 	}
-	if err := r.store.MarkOutboxPublishedBatch(ctx, ids); err != nil {
+	if err := r.store.MarkOutboxPublishedBatch(ctx, conn, ids); err != nil {
 		return 0, err
 	}
 	r.metrics.OutboxPublished.Add(float64(len(events)))

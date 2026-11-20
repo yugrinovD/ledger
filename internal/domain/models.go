@@ -74,10 +74,6 @@ type Account struct {
 
 func (a Account) NormalSide() Direction { return a.Type.NormalSide() }
 
-func (a Account) Spendable() bool {
-	return a.Status == AccountActive
-}
-
 // Balance is the normal-side projection of an account. For a liability account
 // a positive balance means the customer has funds; for an asset account it means
 // the ledger holds funds.
@@ -96,9 +92,6 @@ type TransactionType string
 const (
 	TransactionTransfer    TransactionType = "transfer"
 	TransactionHoldCapture TransactionType = "hold_capture"
-	TransactionAdjustment  TransactionType = "adjustment"
-	TransactionFee         TransactionType = "fee"
-	TransactionReversal    TransactionType = "reversal"
 )
 
 type JournalTransaction struct {
@@ -124,8 +117,7 @@ type Entry struct {
 type TransferStatus string
 
 const (
-	TransferPosted   TransferStatus = "posted"
-	TransferReversed TransferStatus = "reversed"
+	TransferPosted TransferStatus = "posted"
 )
 
 type Transfer struct {

@@ -18,16 +18,17 @@ import (
 )
 
 type Server struct {
-	cfg     config.Config
-	store   *postgres.Store
-	svc     *usecase.Service
-	logger  *slog.Logger
-	metrics *observability.Metrics
-	limiter *ratelimit.Limiter
+	cfg            config.Config
+	store          *postgres.Store
+	svc            *usecase.Service
+	logger         *slog.Logger
+	metrics        *observability.Metrics
+	limiter        *ratelimit.Limiter
+	preAuthLimiter *ratelimit.Limiter
 }
 
-func NewServer(cfg config.Config, store *postgres.Store, svc *usecase.Service, logger *slog.Logger, metrics *observability.Metrics, limiter *ratelimit.Limiter) *Server {
-	return &Server{cfg: cfg, store: store, svc: svc, logger: logger, metrics: metrics, limiter: limiter}
+func NewServer(cfg config.Config, store *postgres.Store, svc *usecase.Service, logger *slog.Logger, metrics *observability.Metrics, limiter, preAuthLimiter *ratelimit.Limiter) *Server {
+	return &Server{cfg: cfg, store: store, svc: svc, logger: logger, metrics: metrics, limiter: limiter, preAuthLimiter: preAuthLimiter}
 }
 
 func (s *Server) PublicHandler() http.Handler {
@@ -35,30 +36,29 @@ func (s *Server) PublicHandler() http.Handler {
 	r := chi.NewRouter()
 	r.Use(requestID())
 	r.Use(recoverer(s.logger))
-	r.Use(accessLog(s.logger))
+	r.Use(accessLog(s.logger, s.cfg.TrustedProxies))
 	r.Use(metricsMiddleware(s.metrics))
 	r.Use(timeoutMiddleware(s.cfg.RequestTimeout))
 	r.Use(middleware.Compress(5, "application/json"))
 
 	r.Route("/v1", func(r chi.Router) {
+		r.Use(rateLimitMiddleware(s.preAuthLimiter, s.logger, s.cfg.PreAuthRateLimitRPM, s.cfg.TrustedProxies))
 		r.Use(authMiddleware(s.store, s.cfg.AuthPepper, s.logger))
-		r.Use(rateLimitMiddleware(s.limiter, s.logger, s.cfg.RateLimitRPM))
+		r.Use(rateLimitMiddleware(s.limiter, s.logger, s.cfg.RateLimitRPM, s.cfg.TrustedProxies))
 
-		r.With(requireScope("accounts:write")).Post("/accounts", h.CreateAccount)
-		r.With(requireScope("accounts:read")).Get("/accounts/{accountID}", h.GetAccount)
-		r.With(requireScope("accounts:read")).Get("/accounts/{accountID}/balance", h.GetBalance)
-		r.With(requireScope("accounts:read")).Get("/accounts/{accountID}/entries", h.ListEntries)
+		r.With(requireScope("accounts:write", s.logger)).Post("/accounts", h.CreateAccount)
+		r.With(requireScope("accounts:read", s.logger)).Get("/accounts/{accountID}", h.GetAccount)
+		r.With(requireScope("accounts:read", s.logger)).Get("/accounts/{accountID}/balance", h.GetBalance)
+		r.With(requireScope("accounts:read", s.logger)).Get("/accounts/{accountID}/entries", h.ListEntries)
 
-		r.With(requireScope("transfers:write")).Post("/transfers", h.CreateTransfer)
-		r.With(requireScope("transfers:read")).Get("/transfers/{transferID}", h.GetTransfer)
+		r.With(requireScope("transfers:write", s.logger)).Post("/transfers", h.CreateTransfer)
+		r.With(requireScope("transfers:read", s.logger)).Get("/transfers/{transferID}", h.GetTransfer)
 
-		r.With(requireScope("holds:write")).Post("/holds", h.CreateHold)
-		r.With(requireScope("holds:read")).Get("/holds/{holdID}", h.GetHold)
-		r.With(requireScope("holds:write")).Post("/holds/{holdID}/capture", h.CaptureHold)
-		r.With(requireScope("holds:write")).Post("/holds/{holdID}/release", h.ReleaseHold)
+		r.With(requireScope("holds:write", s.logger)).Post("/holds", h.CreateHold)
+		r.With(requireScope("holds:read", s.logger)).Get("/holds/{holdID}", h.GetHold)
+		r.With(requireScope("holds:write", s.logger)).Post("/holds/{holdID}/capture", h.CaptureHold)
+		r.With(requireScope("holds:write", s.logger)).Post("/holds/{holdID}/release", h.ReleaseHold)
 
-		r.With(requireScope("reconciliation:read")).Get("/reconciliation/runs", h.ListReconciliationRuns)
-		r.With(requireScope("reconciliation:read")).Get("/reconciliation/runs/{runID}", h.GetReconciliationRun)
 	})
 
 	return otelhttp.NewHandler(r, "ledger-api", otelhttp.WithSpanNameFormatter(func(string, *http.Request) string {

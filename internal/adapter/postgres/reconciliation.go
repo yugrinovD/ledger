@@ -3,12 +3,12 @@ package postgres
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/yugrinovD/ledger/internal/domain"
 	"github.com/yugrinovD/ledger/internal/reconciliation"
 )
 
@@ -19,13 +19,15 @@ func (s *Store) BeginReconciliationRun(ctx context.Context, id uuid.UUID, starte
 	return err
 }
 
-func (s *Store) FinishReconciliationRun(ctx context.Context, r reconciliation.Run) error {
-	_, err := s.pool.Exec(ctx, `
+func (s *Store) FinishReconciliationRun(ctx context.Context, r reconciliation.Run) (time.Time, error) {
+	var finishedAt time.Time
+	err := s.pool.QueryRow(ctx, `
 		UPDATE reconciliation_runs
 		SET finished_at = now(), status = $2, checked_accounts = $3,
 			discrepancy_count = $4, error = NULLIF($5, ''), stats = $6
-		WHERE id = $1`, r.ID, r.Status, r.CheckedAccounts, r.DiscrepancyCount, r.Error, r.Stats)
-	return err
+		WHERE id = $1
+		RETURNING finished_at`, r.ID, r.Status, r.CheckedAccounts, r.DiscrepancyCount, r.Error, r.Stats).Scan(&finishedAt)
+	return finishedAt, err
 }
 
 func (s *Store) InsertDiscrepancies(ctx context.Context, runID uuid.UUID, items []reconciliation.Discrepancy) error {
@@ -52,7 +54,7 @@ func (s *Store) GetReconciliationRun(ctx context.Context, id uuid.UUID) (reconci
 		FROM reconciliation_runs WHERE id = $1`, id).Scan(
 		&r.ID, &r.StartedAt, &r.FinishedAt, &r.Status, &r.CheckedAccounts, &r.DiscrepancyCount, &r.Error, &r.Stats)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return reconciliation.Run{}, fmt.Errorf("reconciliation run %s not found", id)
+		return reconciliation.Run{}, domain.NotFound("reconciliation run %s", id)
 	}
 	return r, err
 }
@@ -90,7 +92,7 @@ func (s *Store) ListDiscrepancies(ctx context.Context, runID uuid.UUID) ([]recon
 		return nil, err
 	}
 	defer rows.Close()
-	var out []reconciliation.Discrepancy
+	out := make([]reconciliation.Discrepancy, 0)
 	for rows.Next() {
 		var d reconciliation.Discrepancy
 		if err := rows.Scan(&d.ID, &d.Kind, &d.AccountID, &d.TransactionID, &d.Expected, &d.Actual, &d.Details); err != nil {
@@ -214,10 +216,10 @@ func (s *Store) FindUnbalancedTransactions(ctx context.Context, q Querier) ([]re
 
 func (s *Store) FindTransferEntryCountAnomalies(ctx context.Context, q Querier) ([]reconciliation.Discrepancy, error) {
 	rows, err := q.Query(ctx, `
-		SELECT t.id, count(e.id)
+		SELECT t.id, t.transaction_id, count(e.id)
 		FROM transfers t
 		LEFT JOIN journal_entries e ON e.transaction_id = t.transaction_id
-		GROUP BY t.id
+		GROUP BY t.id, t.transaction_id
 		HAVING count(e.id) <> 2
 		ORDER BY t.id`)
 	if err != nil {
@@ -227,35 +229,20 @@ func (s *Store) FindTransferEntryCountAnomalies(ctx context.Context, q Querier) 
 	var out []reconciliation.Discrepancy
 	for rows.Next() {
 		var d reconciliation.Discrepancy
-		var txID uuid.UUID
+		var transferID, txID uuid.UUID
 		var count int64
-		if err := rows.Scan(&txID, &count); err != nil {
+		if err := rows.Scan(&transferID, &txID, &count); err != nil {
 			return nil, err
 		}
 		d.Kind = "transfer_entry_count"
 		d.TransactionID = &txID
+		d.Details = map[string]any{"transfer_id": transferID.String()}
 		expected := int64(2)
 		d.Expected = &expected
 		d.Actual = &count
 		out = append(out, d)
 	}
 	return out, rows.Err()
-}
-
-func (s *Store) RepairBalance(ctx context.Context, tx pgx.Tx, accountID uuid.UUID, expected int64) error {
-	_, err := tx.Exec(ctx, `
-		UPDATE account_balances
-		SET balance_minor = $2, version = version + 1, updated_at = now()
-		WHERE account_id = $1`, accountID, expected)
-	return err
-}
-
-func (s *Store) RepairHeld(ctx context.Context, tx pgx.Tx, accountID uuid.UUID, expected int64) error {
-	_, err := tx.Exec(ctx, `
-		UPDATE account_balances
-		SET held_minor = $2, version = version + 1, updated_at = now()
-		WHERE account_id = $1`, accountID, expected)
-	return err
 }
 
 type AccountRepair struct {

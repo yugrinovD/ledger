@@ -6,9 +6,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-
 	"github.com/jackc/pgx/v5"
 
+	"github.com/yugrinovD/ledger/internal/db"
 	"github.com/yugrinovD/ledger/internal/outbox"
 )
 
@@ -25,13 +25,20 @@ func (s *Store) InsertOutbox(ctx context.Context, tx pgx.Tx, e outbox.Event) err
 	return err
 }
 
-func (s *Store) PollOutbox(ctx context.Context, limit int) ([]outbox.Event, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT id, event_id, aggregate_type, aggregate_id, event_type, payload, headers,
-			created_at, available_at, attempts
-		FROM outbox
-		WHERE published_at IS NULL AND available_at <= now()
-		ORDER BY id
+func (s *Store) PollOutbox(ctx context.Context, q db.Querier, limit int) ([]outbox.Event, error) {
+	rows, err := q.Query(ctx, `
+		SELECT o.id, o.event_id, o.aggregate_type, o.aggregate_id, o.event_type, o.payload, o.headers,
+			o.created_at, o.available_at, o.attempts
+		FROM outbox o
+		WHERE o.published_at IS NULL
+		  AND o.available_at <= now()
+		  AND NOT EXISTS (
+		      SELECT 1 FROM outbox p
+		      WHERE p.aggregate_id = o.aggregate_id
+		        AND p.published_at IS NULL
+		        AND p.id < o.id
+		  )
+		ORDER BY o.id
 		LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
@@ -56,8 +63,8 @@ func (s *Store) PollOutbox(ctx context.Context, limit int) ([]outbox.Event, erro
 	return out, rows.Err()
 }
 
-func (s *Store) MarkOutboxFailed(ctx context.Context, id int64, reason string, nextAttempt time.Duration) error {
-	_, err := s.pool.Exec(ctx, `
+func (s *Store) MarkOutboxFailed(ctx context.Context, q db.Querier, id int64, reason string, nextAttempt time.Duration) error {
+	_, err := q.Exec(ctx, `
 		UPDATE outbox
 		SET attempts = attempts + 1,
 			last_error = $2,
@@ -66,8 +73,8 @@ func (s *Store) MarkOutboxFailed(ctx context.Context, id int64, reason string, n
 	return err
 }
 
-func (s *Store) OutboxStats(ctx context.Context) (pending int64, oldestAgeSeconds float64, err error) {
-	err = s.pool.QueryRow(ctx, `
+func (s *Store) OutboxStats(ctx context.Context, q db.Querier) (pending int64, oldestAgeSeconds float64, err error) {
+	err = q.QueryRow(ctx, `
 		SELECT count(*), COALESCE(EXTRACT(EPOCH FROM now() - min(created_at)), 0)
 		FROM outbox
 		WHERE published_at IS NULL`).Scan(&pending, &oldestAgeSeconds)
@@ -99,11 +106,11 @@ func (s *Store) ConsumeEvent(ctx context.Context, consumer string, eventID uuid.
 	return processed, err
 }
 
-func (s *Store) MarkOutboxPublishedBatch(ctx context.Context, ids []int64) error {
+func (s *Store) MarkOutboxPublishedBatch(ctx context.Context, q db.Querier, ids []int64) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	_, err := s.pool.Exec(ctx, `
+	_, err := q.Exec(ctx, `
 		UPDATE outbox SET published_at = now()
 		WHERE id = ANY($1) AND published_at IS NULL`, ids)
 	return err
