@@ -17,10 +17,15 @@ short English overview for reviewers.
 - Pessimistic row locks in deterministic UUID order, retries on deadlocks and
   serialization failures, `READ COMMITTED` for money paths.
 - Holds with capture, release and expiry; same-currency transfers (no FX).
+  Frozen accounts block new holds/transfers and capture of existing holds.
+- Source accounts are owner-checked; destinations are open-loop payees and may
+  belong to another tenant (ADR-006).
 - Independent reconciliation, admin-only and protected by `LEDGER_ADMIN_TOKEN`,
-  that detects drift and repairs derived balances without touching the journal.
+  that detects drift, empty transactions and broken hold captures, and repairs
+  derived balances without touching the journal.
 - Strict per-aggregate outbox ordering; relay leadership uses the same DB
-  connection for its advisory lock and every outbox query.
+  connection for its advisory lock and every outbox query. Events that exhaust
+  the relay retry budget are parked and can be requeued from admin/CLI.
 - Retention jobs for published outbox, processed/audit events and reconciliation
   history; freeze/unfreeze/close accounts and revoke API keys via admin CLI/API.
 - API keys, rate limiting, OpenAPI, migrations, CLI, metrics, structured logs,
@@ -63,6 +68,8 @@ account/key administration live on the admin port and require
 | Crash between commit and publish | outbox relay publishes later |
 | Crash after publish before mark | duplicate event, consumer dedupes |
 | Broker down | API keeps accepting, outbox grows, alert fires |
+| Poison outbox event | parked after the retry budget; later events of the same aggregate proceed; admin/CLI can requeue |
+| Partial batch publish | successful records may be republished; consumers dedupe by `event_id` |
 | Concurrent spend | row lock, exactly one succeeds, no negative balance |
 | Deadlock | deterministic lock order plus retry |
 | Process crash mid-transaction | rollback, no partial entries |

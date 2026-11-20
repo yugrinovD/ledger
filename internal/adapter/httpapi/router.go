@@ -34,6 +34,7 @@ func NewServer(cfg config.Config, store *postgres.Store, svc *usecase.Service, l
 func (s *Server) PublicHandler() http.Handler {
 	h := NewHandlers(s.svc)
 	r := chi.NewRouter()
+	r.Use(securityHeaders())
 	r.Use(requestID())
 	r.Use(recoverer(s.logger))
 	r.Use(accessLog(s.logger, s.cfg.TrustedProxies))

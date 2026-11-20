@@ -21,7 +21,10 @@ Delivery is at-least-once:
 - crash after publish and before marking -> the event is published again;
 - consumers make effects idempotent with `processed_events (consumer, event_id)`
   in the same transaction as the projection;
-- poison messages go to a dead-letter topic after bounded retries.
+- consumer poison messages go to a dead-letter topic after bounded retries;
+- relay events that exhaust the publish retry budget are parked (`parked_at`)
+  instead of blocking their aggregate forever, exposed as a metric and requeued
+  by an operator through the admin API/CLI.
 
 A single active relay is elected with a PostgreSQL advisory lock held on the
 same connection used for outbox SQL. If that connection dies, the lock is

@@ -7,6 +7,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/yugrinovD/ledger/internal/domain"
+	"github.com/yugrinovD/ledger/internal/outbox"
 )
 
 func (s *Service) FreezeAccount(ctx context.Context, id uuid.UUID) (AccountView, error) {
@@ -62,4 +63,19 @@ func (s *Service) setAccountStatus(ctx context.Context, id uuid.UUID, status dom
 
 func (s *Service) RevokeAPIKey(ctx context.Context, id uuid.UUID) error {
 	return s.store.RevokeAPIKey(ctx, id)
+}
+
+func (s *Service) ListParkedOutbox(ctx context.Context, limit int) ([]outbox.Event, error) {
+	return s.store.ListParkedOutbox(ctx, s.pool, normalizeLimit(limit))
+}
+
+func (s *Service) RequeueOutbox(ctx context.Context, id int64) error {
+	requeued, err := s.store.RequeueOutbox(ctx, s.pool, id)
+	if err != nil {
+		return err
+	}
+	if !requeued {
+		return domain.NotFound("parked outbox event %d", id)
+	}
+	return nil
 }

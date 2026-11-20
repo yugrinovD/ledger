@@ -31,11 +31,13 @@ func (s *Store) PollOutbox(ctx context.Context, q db.Querier, limit int) ([]outb
 			o.created_at, o.available_at, o.attempts
 		FROM outbox o
 		WHERE o.published_at IS NULL
+		  AND o.parked_at IS NULL
 		  AND o.available_at <= now()
 		  AND NOT EXISTS (
 		      SELECT 1 FROM outbox p
 		      WHERE p.aggregate_id = o.aggregate_id
 		        AND p.published_at IS NULL
+		        AND p.parked_at IS NULL
 		        AND p.id < o.id
 		  )
 		ORDER BY o.id
@@ -73,12 +75,74 @@ func (s *Store) MarkOutboxFailed(ctx context.Context, q db.Querier, id int64, re
 	return err
 }
 
+func (s *Store) MarkOutboxParked(ctx context.Context, q db.Querier, id int64, reason string) error {
+	_, err := q.Exec(ctx, `
+		UPDATE outbox
+		SET attempts = attempts + 1,
+			last_error = $2,
+			parked_at = now()
+		WHERE id = $1 AND published_at IS NULL`, id, reason)
+	return err
+}
+
+func (s *Store) ListParkedOutbox(ctx context.Context, q db.Querier, limit int) ([]outbox.Event, error) {
+	rows, err := q.Query(ctx, `
+		SELECT id, event_id, aggregate_type, aggregate_id, event_type, payload, headers,
+			created_at, available_at, attempts, COALESCE(last_error, ''), parked_at
+		FROM outbox
+		WHERE published_at IS NULL AND parked_at IS NOT NULL
+		ORDER BY parked_at DESC, id DESC
+		LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []outbox.Event
+	for rows.Next() {
+		var e outbox.Event
+		var headers []byte
+		if err := rows.Scan(&e.ID, &e.EventID, &e.AggregateType, &e.AggregateID, &e.Type,
+			&e.Payload, &headers, &e.CreatedAt, &e.AvailableAt, &e.Attempts, &e.LastError, &e.ParkedAt); err != nil {
+			return nil, err
+		}
+		if len(headers) > 0 {
+			if err := json.Unmarshal(headers, &e.Headers); err != nil {
+				return nil, err
+			}
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) RequeueOutbox(ctx context.Context, q db.Querier, id int64) (bool, error) {
+	tag, err := q.Exec(ctx, `
+		UPDATE outbox
+		SET parked_at = NULL,
+			attempts = 0,
+			last_error = NULL,
+			available_at = now()
+		WHERE id = $1 AND published_at IS NULL AND parked_at IS NOT NULL`, id)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 func (s *Store) OutboxStats(ctx context.Context, q db.Querier) (pending int64, oldestAgeSeconds float64, err error) {
 	err = q.QueryRow(ctx, `
 		SELECT count(*), COALESCE(EXTRACT(EPOCH FROM now() - min(created_at)), 0)
 		FROM outbox
-		WHERE published_at IS NULL`).Scan(&pending, &oldestAgeSeconds)
+		WHERE published_at IS NULL AND parked_at IS NULL`).Scan(&pending, &oldestAgeSeconds)
 	return pending, oldestAgeSeconds, err
+}
+
+func (s *Store) OutboxParkedCount(ctx context.Context, q db.Querier) (int64, error) {
+	var parked int64
+	err := q.QueryRow(ctx, `
+		SELECT count(*) FROM outbox
+		WHERE published_at IS NULL AND parked_at IS NOT NULL`).Scan(&parked)
+	return parked, err
 }
 
 func (s *Store) ConsumeEvent(ctx context.Context, consumer string, eventID uuid.UUID, eventType string, aggregateID uuid.UUID, payload []byte) (bool, error) {

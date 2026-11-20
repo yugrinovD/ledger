@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -84,6 +85,48 @@ func TestAdminEndpointsFreezeRevokeAndTenantIsolation(t *testing.T) {
 	}
 	if res := apiGet(t, public.URL+"/v1/accounts/"+alice.ID, plainKey); res.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("revoked key = %d, want 401", res.StatusCode)
+	}
+}
+
+func TestAdminOutboxParkedListAndRequeue(t *testing.T) {
+	pool, store, svc := setup(t)
+	event := insertOutboxEvent(t, pool, store, uuid.New(), "parked.event")
+	if _, err := pool.Exec(context.Background(), `
+		UPDATE outbox SET parked_at = now(), last_error = 'simulated' WHERE event_id = $1`, event.EventID); err != nil {
+		t.Fatal(err)
+	}
+
+	const adminToken = "integration-admin-token"
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	adminBase := observability.AdminHandler(prometheus.NewRegistry(), store.Ping, false)
+	admin := httptest.NewServer(httpapi.NewAdminHandler(adminBase, svc, adminToken, logger))
+	defer admin.Close()
+
+	res := adminGet(t, admin.URL+"/admin/outbox/parked", adminToken)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("list parked = %d body=%s", res.StatusCode, res.Body)
+	}
+	var payload struct {
+		Events []struct {
+			ID      int64  `json:"id"`
+			LastErr string `json:"last_error"`
+		} `json:"events"`
+	}
+	if err := json.Unmarshal(res.Body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Events) != 1 || payload.Events[0].LastErr != "simulated" {
+		t.Fatalf("unexpected parked events: %+v", payload.Events)
+	}
+	if res := adminPost(t, admin.URL+"/admin/outbox/"+strconv.FormatInt(payload.Events[0].ID, 10)+"/requeue", adminToken); res.StatusCode != http.StatusOK {
+		t.Fatalf("requeue = %d body=%s", res.StatusCode, res.Body)
+	}
+	parked, err := store.OutboxParkedCount(context.Background(), pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parked != 0 {
+		t.Fatalf("parked after admin requeue = %d, want 0", parked)
 	}
 }
 

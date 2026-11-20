@@ -143,7 +143,13 @@ func mustParse(t *testing.T, value string) uuid.UUID {
 }
 
 func newRelay(pool *pgxpool.Pool, store *postgres.Store, publisher outbox.Publisher) *outbox.Relay {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	metrics := observability.NewMetrics(prometheus.NewRegistry())
-	return outbox.NewRelay(pool, store, publisher, "ledger.events.test", 100, 5*time.Millisecond, 20, logger, metrics)
+	return outbox.NewRelay(pool, store, publisher, "ledger.events.test", 100, 5*time.Millisecond, 20, testLogger(), testMetrics())
+}
+
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func testMetrics() *observability.Metrics {
+	return observability.NewMetrics(prometheus.NewRegistry())
 }

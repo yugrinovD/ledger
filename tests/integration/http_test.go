@@ -194,6 +194,95 @@ func doRequest(t *testing.T, req *http.Request) httpResult {
 	return httpResult{StatusCode: res.StatusCode, Header: res.Header.Clone(), Body: body}
 }
 
+func TestHTTPHoldLifecycle(t *testing.T) {
+	_, store, svc := setup(t)
+	system := createAccount(t, svc, "system", "system-equity", "USD", "equity", true)
+	alice := createAccount(t, svc, "alice", "alice-wallet", "USD", "liability", false)
+	merchant := createAccount(t, svc, "merchant", "merchant-wallet", "USD", "liability", false)
+	fund(t, svc, system.ID, alice.ID, "100.00", "USD")
+
+	pepper := "hold-pepper"
+	_, plainKey := createAPIKeyForOwner(t, store, pepper, "alice")
+	cfg := config.Config{AuthPepper: pepper, RequestTimeout: 5 * time.Second}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	metrics := observability.NewMetrics(prometheus.NewRegistry())
+	server := httptest.NewServer(httpapi.NewServer(cfg, store, svc, logger, metrics, nil, nil).PublicHandler())
+	defer server.Close()
+
+	create := apiPost(t, server.URL+"/v1/holds", plainKey, "http-hold-1", map[string]any{
+		"account_id": alice.ID, "amount": "25.00", "currency": "USD",
+	})
+	if create.StatusCode != http.StatusCreated {
+		t.Fatalf("create hold = %d body=%s", create.StatusCode, create.Body)
+	}
+	if create.Header.Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatal("security headers are missing")
+	}
+	var hold usecase.HoldView
+	if err := json.Unmarshal(create.Body, &hold); err != nil {
+		t.Fatal(err)
+	}
+	if got := apiGet(t, server.URL+"/v1/holds/"+hold.ID, plainKey); got.StatusCode != http.StatusOK {
+		t.Fatalf("get hold = %d body=%s", got.StatusCode, got.Body)
+	}
+
+	release := apiPost(t, server.URL+"/v1/holds/"+hold.ID+"/release", plainKey, "http-release-1", map[string]any{})
+	if release.StatusCode != http.StatusOK {
+		t.Fatalf("release hold = %d body=%s", release.StatusCode, release.Body)
+	}
+
+	create = apiPost(t, server.URL+"/v1/holds", plainKey, "http-hold-2", map[string]any{
+		"account_id": alice.ID, "amount": "10.00", "currency": "USD",
+	})
+	if create.StatusCode != http.StatusCreated {
+		t.Fatalf("create second hold = %d body=%s", create.StatusCode, create.Body)
+	}
+	if err := json.Unmarshal(create.Body, &hold); err != nil {
+		t.Fatal(err)
+	}
+	capture := apiPost(t, server.URL+"/v1/holds/"+hold.ID+"/capture", plainKey, "http-capture-1", map[string]any{
+		"destination_account_id": merchant.ID,
+	})
+	if capture.StatusCode != http.StatusOK {
+		t.Fatalf("capture hold = %d body=%s", capture.StatusCode, capture.Body)
+	}
+	var captured usecase.HoldView
+	if err := json.Unmarshal(capture.Body, &captured); err != nil {
+		t.Fatal(err)
+	}
+	if captured.Status != "captured" {
+		t.Fatalf("hold status = %s, want captured", captured.Status)
+	}
+	if got := balance(t, svc, "alice", alice.ID); got.Balance != "90.00" || got.Held != "0.00" {
+		t.Fatalf("unexpected alice balance: %+v", got)
+	}
+}
+
+func TestHTTPCreateAccountWithAllowNegative(t *testing.T) {
+	_, store, svc := setup(t)
+	pepper := "allow-negative-pepper"
+	_, plainKey := createAPIKey(t, store, pepper, "system")
+	cfg := config.Config{AuthPepper: pepper, RequestTimeout: 5 * time.Second}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	metrics := observability.NewMetrics(prometheus.NewRegistry())
+	server := httptest.NewServer(httpapi.NewServer(cfg, store, svc, logger, metrics, nil, nil).PublicHandler())
+	defer server.Close()
+
+	res := apiPost(t, server.URL+"/v1/accounts", plainKey, "http-allow-negative", map[string]any{
+		"name": "system-http", "currency": "USD", "type": "equity", "allow_negative": true,
+	})
+	if res.StatusCode != http.StatusCreated {
+		t.Fatalf("create account = %d body=%s", res.StatusCode, res.Body)
+	}
+	var account usecase.AccountView
+	if err := json.Unmarshal(res.Body, &account); err != nil {
+		t.Fatal(err)
+	}
+	if !account.AllowNegative {
+		t.Fatal("allow_negative was not persisted")
+	}
+}
+
 func TestMissingScopeReturnsForbidden(t *testing.T) {
 	_, store, svc := setup(t)
 	system := createAccount(t, svc, "system", "system-equity", "USD", "equity", true)

@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/yugrinovD/ledger/internal/db"
 	"github.com/yugrinovD/ledger/internal/outbox"
 )
 
@@ -97,7 +98,7 @@ func TestOutboxRelayStopsWhenLeadershipConnectionDies(t *testing.T) {
 	}
 	defer conn.Release()
 	var locked bool
-	if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock(hashtext('ledger_outbox_relay'))`).Scan(&locked); err != nil {
+	if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, db.OutboxRelayLockKey).Scan(&locked); err != nil {
 		t.Fatal(err)
 	}
 	if !locked {

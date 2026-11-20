@@ -18,6 +18,8 @@ type Event struct {
 	CreatedAt     time.Time
 	AvailableAt   time.Time
 	Attempts      int
+	LastError     string
+	ParkedAt      *time.Time
 }
 
 // Envelope is the stable wire format for every ledger event. Consumers must be

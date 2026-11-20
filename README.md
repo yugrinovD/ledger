@@ -160,6 +160,8 @@ admin-порт и защищён отдельным токеном. Специф
 | POST | `/admin/accounts/{id}/unfreeze` | разморозить счёт |
 | POST | `/admin/accounts/{id}/close` | закрыть счёт с нулевым балансом |
 | POST | `/admin/api-keys/{id}/revoke` | отозвать API key |
+| GET | `/admin/outbox/parked` | события, запаркованные после исчерпания retry |
+| POST | `/admin/outbox/{id}/requeue` | вернуть запаркованное событие в очередь |
 
 ```bash
 curl -sS http://localhost:9090/admin/reconciliation/runs \
@@ -167,6 +169,8 @@ curl -sS http://localhost:9090/admin/reconciliation/runs \
 
 docker compose --profile tools run --rm ledgerctl apikey-revoke --id <key-id>
 docker compose --profile tools run --rm ledgerctl account freeze --account <account-id>
+docker compose --profile tools run --rm ledgerctl outbox ls-parked
+docker compose --profile tools run --rm ledgerctl outbox requeue --id <outbox-id>
 ```
 
 ## Модель данных и double-entry
@@ -271,7 +275,9 @@ consumer = exactly-once effect**, а не «exactly-once delivery».
 | Падение после publish до отметки | событие повторится, consumer дедуплицирует |
 | Брокер недоступен | API продолжает работать, outbox растёт, срабатывает алерт |
 | Consumer упал | offset не коммитится, событие переобработается |
-| Poison message | 3 ретрая → DLQ, исходный offset коммитится |
+| Poison message в consumer | 3 ретрая → DLQ, исходный offset коммитится |
+| Poison event в outbox relay | после `LEDGER_OUTBOX_MAX_ATTEMPTS` событие паркуется, не блокирует более поздние события агрегата; admin/CLI может вернуть его через requeue |
+| Частичный успех batch publish | часть событий может опубликоваться повторно; consumer дедуплицирует по `event_id` |
 | Падение процесса в транзакции | rollback, частичных проводок нет |
 
 Relay публикует батчи (по умолчанию 1000 событий / 100 мс) и отмечает их одним
@@ -280,7 +286,11 @@ advisory lock на том же соединении, через которое �
 если соединение умерло, lock освобождается, и старый лидер больше не публикует.
 Строгий per-aggregate order обеспечивается запросом с `NOT EXISTS` более раннего
 неопубликованного события; более поздние события агрегата ждут. Второй worker
-находится в standby и подхватывает лидерство.
+находится в standby и подхватывает лидерство. Событие, исчерпавшее
+`LEDGER_OUTBOX_MAX_ATTEMPTS`, получает `parked_at`: оно перестаёт блокировать
+очередь агрегата, отражается в метрике `ledger_outbox_parked_events` и может быть
+возвращено оператором через `/admin/outbox/{id}/requeue` или `ledgerctl outbox
+requeue`.
 
 ## Конкурентность, изоляция, deadlock
 
@@ -304,7 +314,11 @@ advisory lock на том же соединении, через которое �
 - capture создаёт сбалансированную journal-транзакцию и уменьшает `held_minor`;
 - release и expiry-worker снимают резерв;
 - просроченные hold’ы освобождаются фоновой джобой;
+- `frozen` блокирует создание transfer/hold и capture уже созданного hold;
+  release/expiry на frozen счёте разрешены, потому что только уменьшают `held`;
 - счёт имеет одну валюту, перевод/холд требуют совпадения валют;
+- source-счёт обязан принадлежать владельцу API key; destination — open-loop
+  payee и может принадлежать другому tenant (см. ADR-006);
 - мультивалютность = несколько валют в одном ledger, без FX. FX (rate snapshot,
   FX-position accounts, 4 проводки) — отдельный ADR/roadmap.
 
@@ -317,9 +331,11 @@ Reconciliation — операционная функция администра�
 1. `sum(journal_entries)` = `account_balances.balance_minor`;
 2. `sum(active holds)` = `held_minor`;
 3. каждая journal-транзакция сбалансирована;
-4. у каждого transfer ровно две проводки;
-5. outbox backlog и возраст старейшего события;
-6. stretch: импорт внешней выписки.
+4. нет journal-транзакций без проводок;
+5. у каждого transfer/captured hold ровно две проводки и корректная связка
+   `captured_transaction_id`;
+6. outbox backlog и возраст старейшего события;
+7. stretch: импорт внешней выписки.
 
 Результаты пишутся в `reconciliation_runs` / `reconciliation_discrepancies`,
 метрика `ledger_reconciliation_discrepancies{kind}`. Repair по умолчанию

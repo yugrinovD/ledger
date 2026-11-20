@@ -14,6 +14,7 @@ tags:
   - name: reconciliation
   - name: accounts
   - name: api-keys
+  - name: outbox
 paths:
   /admin/reconciliation/runs:
     get:
@@ -128,6 +129,51 @@ paths:
           description: Revoked
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+  /admin/outbox/parked:
+    get:
+      tags: [outbox]
+      summary: List outbox events parked after exceeding the retry budget
+      operationId: listParkedOutbox
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        '200':
+          description: Parked events
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [events]
+                properties:
+                  events:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/OutboxEvent'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /admin/outbox/{eventID}/requeue:
+    post:
+      tags: [outbox]
+      summary: Requeue a parked outbox event
+      operationId: requeueOutbox
+      parameters:
+        - name: eventID
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: Requeued
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [requeued]
+                properties:
+                  requeued: { type: boolean }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
 components:
   securitySchemes:
     adminAuth:
@@ -147,7 +193,7 @@ components:
   schemas:
     Account:
       type: object
-      required: [id, owner_id, name, currency, type, status, created_at]
+      required: [id, owner_id, name, currency, type, status, allow_negative, created_at]
       properties:
         id: { type: string, format: uuid }
         owner_id: { type: string }
@@ -155,7 +201,24 @@ components:
         currency: { type: string }
         type: { type: string }
         status: { type: string }
+        allow_negative: { type: boolean }
         created_at: { type: string, format: date-time }
+    OutboxEvent:
+      type: object
+      required: [id, event_id, aggregate_type, aggregate_id, type, payload, attempts, created_at, available_at]
+      properties:
+        id: { type: integer, format: int64 }
+        event_id: { type: string, format: uuid }
+        aggregate_type: { type: string }
+        aggregate_id: { type: string, format: uuid }
+        type: { type: string }
+        payload: { type: object, additionalProperties: true }
+        headers: { type: object, additionalProperties: { type: string } }
+        attempts: { type: integer }
+        last_error: { type: string }
+        created_at: { type: string, format: date-time }
+        available_at: { type: string, format: date-time }
+        parked_at: { type: string, format: date-time }
     ReconciliationRun:
       type: object
       required: [id, status, started_at, checked_accounts, discrepancy_count, stats]

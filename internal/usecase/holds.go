@@ -171,7 +171,7 @@ func (s *Service) CaptureHold(ctx context.Context, in CaptureHoldInput) (HoldVie
 			}
 			source := locked[hold.AccountID]
 			destination := locked[in.DestinationAccountID]
-			if source.account.Status == domain.AccountClosed {
+			if source.account.Status != domain.AccountActive {
 				return idempotency.Result{}, accountStatusError(source.account, "source")
 			}
 			if destination.account.Status != domain.AccountActive {

@@ -39,6 +39,13 @@ func writeProblem(w http.ResponseWriter, r *http.Request, logger *slog.Logger, e
 		p.Detail = "request canceled"
 	}
 	p.Title = http.StatusText(p.Status)
+	if p.Title == "" {
+		if p.Status == 499 {
+			p.Title = "Client Closed Request"
+		} else {
+			p.Title = "Unknown Error"
+		}
+	}
 	p.RequestID = RequestIDFrom(r.Context())
 	if p.Status >= 500 {
 		logger.Error("request failed", "request_id", p.RequestID, "err", err)

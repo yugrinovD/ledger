@@ -56,6 +56,31 @@ func TestLoadRejectsInvalidDuration(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsNaNTraceRatio(t *testing.T) {
+	cleanEnv(t)
+	t.Setenv("LEDGER_TRACE_RATIO", "NaN")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected NaN trace ratio to fail")
+	}
+}
+
+func TestLoadRejectsNonPositiveIntervals(t *testing.T) {
+	for _, key := range []string{
+		"LEDGER_OUTBOX_POLL_INTERVAL",
+		"LEDGER_RECONCILIATION_INTERVAL",
+		"LEDGER_HOLD_SWEEP_INTERVAL",
+		"LEDGER_SHUTDOWN_TIMEOUT",
+	} {
+		t.Run(key, func(t *testing.T) {
+			cleanEnv(t)
+			t.Setenv(key, "0s")
+			if _, err := Load(); err == nil {
+				t.Fatalf("expected %s=0s to fail", key)
+			}
+		})
+	}
+}
+
 func TestLoadRejectsInvalidTrustedProxy(t *testing.T) {
 	cleanEnv(t)
 	t.Setenv("LEDGER_TRUSTED_PROXIES", "10.0.0.0/8,not-a-cidr")

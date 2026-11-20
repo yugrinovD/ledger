@@ -52,13 +52,14 @@ func (s *Service) SetReconciliationTimeout(d time.Duration) {
 }
 
 type AccountView struct {
-	ID        string    `json:"id"`
-	OwnerID   string    `json:"owner_id"`
-	Name      string    `json:"name"`
-	Currency  string    `json:"currency"`
-	Type      string    `json:"type"`
-	Status    string    `json:"status"`
-	CreatedAt time.Time `json:"created_at"`
+	ID            string    `json:"id"`
+	OwnerID       string    `json:"owner_id"`
+	Name          string    `json:"name"`
+	Currency      string    `json:"currency"`
+	Type          string    `json:"type"`
+	Status        string    `json:"status"`
+	AllowNegative bool      `json:"allow_negative"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 type BalanceView struct {
@@ -111,7 +112,8 @@ type HoldView struct {
 func accountView(a domain.Account) AccountView {
 	return AccountView{
 		ID: a.ID.String(), OwnerID: a.OwnerID, Name: a.Name, Currency: a.Currency.String(),
-		Type: string(a.Type), Status: string(a.Status), CreatedAt: a.CreatedAt.UTC(),
+		Type: string(a.Type), Status: string(a.Status), AllowNegative: a.AllowNegative,
+		CreatedAt: a.CreatedAt.UTC(),
 	}
 }
 

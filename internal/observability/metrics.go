@@ -22,6 +22,7 @@ type Metrics struct {
 	OutboxFailures  prometheus.Counter
 	OutboxPending   prometheus.Gauge
 	OutboxOldestAge prometheus.Gauge
+	OutboxParked    prometheus.Gauge
 
 	ConsumerProcessed *prometheus.CounterVec
 
@@ -94,6 +95,11 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Name:      "outbox_oldest_event_age_seconds",
 			Help:      "Age of the oldest unpublished outbox event.",
 		}),
+		OutboxParked: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: Namespace,
+			Name:      "outbox_parked_events",
+			Help:      "Outbox events parked after exceeding the relay retry budget.",
+		}),
 		ConsumerProcessed: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: Namespace,
 			Name:      "consumer_events_total",
@@ -125,7 +131,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		m.HTTPRequests, m.HTTPDuration, m.HTTPInFlight,
 		m.Transfers, m.TransferDuration, m.TxRetries,
 		m.IdempotencyReplays,
-		m.OutboxPublished, m.OutboxFailures, m.OutboxPending, m.OutboxOldestAge,
+		m.OutboxPublished, m.OutboxFailures, m.OutboxPending, m.OutboxOldestAge, m.OutboxParked,
 		m.ConsumerProcessed,
 		m.ReconciliationDiscrepancies, m.HoldsExpired,
 		m.RetentionDeleted, m.TableEstimatedRows,

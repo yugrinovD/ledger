@@ -298,9 +298,13 @@ components:
           type: string
           enum: [asset, liability, equity, revenue, expense]
           default: liability
+        allow_negative:
+          type: boolean
+          default: false
+          description: 'Allow the account balance to go negative. Intended for system accounts; customer accounts are usually created through the CLI.'
     Account:
       type: object
-      required: [id, owner_id, name, currency, type, status, created_at]
+      required: [id, owner_id, name, currency, type, status, allow_negative, created_at]
       properties:
         id: { type: string, format: uuid }
         owner_id: { type: string }
@@ -308,6 +312,7 @@ components:
         currency: { type: string }
         type: { type: string }
         status: { type: string }
+        allow_negative: { type: boolean }
         created_at: { type: string, format: date-time }
     Balance:
       type: object
@@ -315,7 +320,7 @@ components:
       properties:
         account_id: { type: string, format: uuid }
         currency: { type: string }
-        balance: { type: string, description: 'Decimal string in minor units, e.g. "10.50"' }
+        balance: { type: string, description: 'Decimal string in major units, scaled by the currency (e.g. "10.50" = 10.50 USD).' }
         held: { type: string }
         available: { type: string }
         version: { type: integer, format: int64 }
@@ -326,11 +331,14 @@ components:
       required: [source_account_id, destination_account_id, amount, currency]
       properties:
         source_account_id: { type: string, format: uuid }
-        destination_account_id: { type: string, format: uuid }
+        destination_account_id:
+          type: string
+          format: uuid
+          description: 'May belong to another owner (open-loop payee model); the source account must belong to the authenticated owner.'
         amount:
           type: string
           pattern: '^[0-9]+(\.[0-9]{1,3})?$'
-          description: 'Decimal string; fractional digits are limited by the currency scale (JPY=0, USD=2, KWD=3).'
+          description: 'Decimal string; the pattern is syntax-only, and the server enforces the currency scale (JPY=0, USD=2, KWD=3).'
           example: '10.50'
         currency: { type: string, pattern: '^[A-Za-z]{3}$' }
         description: { type: string, maxLength: 500 }
@@ -355,7 +363,7 @@ components:
         amount:
           type: string
           pattern: '^[0-9]+(\.[0-9]{1,3})?$'
-          description: 'Decimal string; fractional digits are limited by the currency scale (JPY=0, USD=2, KWD=3).'
+          description: 'Decimal string; the pattern is syntax-only, and the server enforces the currency scale (JPY=0, USD=2, KWD=3).'
         currency: { type: string, pattern: '^[A-Za-z]{3}$' }
         expires_at: { type: string, format: date-time }
     CaptureHoldRequest:
@@ -363,7 +371,10 @@ components:
       additionalProperties: false
       required: [destination_account_id]
       properties:
-        destination_account_id: { type: string, format: uuid }
+        destination_account_id:
+          type: string
+          format: uuid
+          description: 'May belong to another owner (open-loop payee model).'
     Hold:
       type: object
       required: [id, account_id, amount, currency, status, expires_at, created_at]

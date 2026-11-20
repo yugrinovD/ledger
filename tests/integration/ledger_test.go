@@ -539,6 +539,85 @@ func TestIdempotencyExpiredRowIsReplaced(t *testing.T) {
 	}
 }
 
+func TestListEntriesCursorPagination(t *testing.T) {
+	_, _, svc := setup(t)
+	system := createAccount(t, svc, "system", "system-equity", "USD", "equity", true)
+	alice := createAccount(t, svc, "alice", "alice-wallet", "USD", "liability", false)
+	for i := 0; i < 5; i++ {
+		fund(t, svc, system.ID, alice.ID, "1.00", "USD")
+	}
+
+	seen := map[string]struct{}{}
+	cursor := ""
+	for pageNumber := 0; pageNumber < 10; pageNumber++ {
+		page, err := svc.ListEntries(context.Background(), "alice", mustParse(t, alice.ID), 2, cursor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range page.Entries {
+			if _, ok := seen[e.ID]; ok {
+				t.Fatalf("entry %s returned twice", e.ID)
+			}
+			seen[e.ID] = struct{}{}
+		}
+		if !page.HasMore {
+			break
+		}
+		if page.NextCursor == "" {
+			t.Fatal("has_more page without next_cursor")
+		}
+		cursor = page.NextCursor
+	}
+	if len(seen) != 5 {
+		t.Fatalf("entries seen = %d, want 5", len(seen))
+	}
+}
+
+func TestReconciliationFindsEmptyTransactionsAndBrokenHoldCaptures(t *testing.T) {
+	pool, store, svc := setup(t)
+	ctx := context.Background()
+	emptyTx := uuid.New()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO journal_transactions (id, type, status) VALUES ($1, 'transfer', 'posted')`, emptyTx); err != nil {
+		t.Fatal(err)
+	}
+	system := createAccount(t, svc, "system", "system-equity", "USD", "equity", true)
+	alice := createAccount(t, svc, "alice", "alice-wallet", "USD", "liability", false)
+	merchant := createAccount(t, svc, "merchant", "merchant-wallet", "USD", "liability", false)
+	fund(t, svc, system.ID, alice.ID, "10.00", "USD")
+	hold, _, err := svc.CreateHold(ctx, usecase.CreateHoldInput{
+		OwnerID: "alice", IdempotencyKey: "rec-hold", AccountID: mustParse(t, alice.ID),
+		Amount: "1.00", Currency: "USD",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.CaptureHold(ctx, usecase.CaptureHoldInput{
+		OwnerID: "alice", IdempotencyKey: "rec-capture", HoldID: mustParse(t, hold.ID),
+		DestinationAccountID: mustParse(t, merchant.ID),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE holds SET captured_transaction_id = NULL WHERE id = $1`, mustParse(t, hold.ID)); err != nil {
+		t.Fatal(err)
+	}
+
+	empty, err := store.FindEmptyTransactions(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(empty) != 1 || empty[0].TransactionID == nil || *empty[0].TransactionID != emptyTx {
+		t.Fatalf("unexpected empty transactions: %+v", empty)
+	}
+	captures, err := store.FindHoldCaptureAnomalies(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(captures) != 1 || captures[0].Details["hold_id"] != hold.ID {
+		t.Fatalf("unexpected hold capture anomalies: %+v", captures)
+	}
+}
+
 func TestTransferEntryCountUsesTransactionAndTransferIDsCorrectly(t *testing.T) {
 	pool, store, svc := setup(t)
 	alice := createAccount(t, svc, "alice", "alice-wallet", "USD", "liability", false)

@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/yugrinovD/ledger/internal/db"
 	"github.com/yugrinovD/ledger/internal/domain"
 	"github.com/yugrinovD/ledger/internal/reconciliation"
 )
@@ -28,7 +29,7 @@ func (s *Service) Reconcile(ctx context.Context, repair bool) (ReconciliationRes
 	}
 	defer conn.Release()
 	var locked bool
-	if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock(hashtext('ledger_reconciliation'))`).Scan(&locked); err != nil {
+	if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, db.ReconciliationLockKey).Scan(&locked); err != nil {
 		return ReconciliationResult{}, err
 	}
 	if !locked {
@@ -37,9 +38,12 @@ func (s *Service) Reconcile(ctx context.Context, repair bool) (ReconciliationRes
 	defer func() {
 		unlockCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		_, _ = conn.Exec(unlockCtx, `SELECT pg_advisory_unlock(hashtext('ledger_reconciliation'))`)
+		_, _ = conn.Exec(unlockCtx, `SELECT pg_advisory_unlock($1)`, db.ReconciliationLockKey)
 	}()
 
+	// The advisory lock above guarantees that no other reconciliation can be
+	// running while this process is inside Reconcile. Any row still marked
+	// running and older than the threshold therefore belongs to a crashed run.
 	if stale, err := s.store.FailStaleReconciliationRuns(ctx, s.now().Add(-time.Hour)); err != nil {
 		s.logger.Warn("could not mark stale reconciliation runs", "err", err)
 	} else if stale > 0 {
@@ -150,6 +154,18 @@ func (s *Service) runChecks(ctx context.Context) ([]reconciliation.Discrepancy, 
 	}
 	all = append(all, unbalanced...)
 
+	empty, err := s.store.FindEmptyTransactions(ctx, tx)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	all = append(all, empty...)
+
+	holdCaptures, err := s.store.FindHoldCaptureAnomalies(ctx, tx)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	all = append(all, holdCaptures...)
+
 	entryCount, err := s.store.FindTransferEntryCountAnomalies(ctx, tx)
 	if err != nil {
 		return nil, 0, nil, err
@@ -220,7 +236,7 @@ func (s *Service) repairAccounts(ctx context.Context, discrepancies []reconcilia
 
 func (s *Service) publishReconciliationMetrics(stats map[string]any) {
 	counts, _ := stats["discrepancies_by_kind"].(map[string]any)
-	kinds := []string{"balance_drift", "hold_drift", "unbalanced_transaction", "transfer_entry_count"}
+	kinds := []string{"balance_drift", "hold_drift", "unbalanced_transaction", "empty_transaction", "hold_capture", "transfer_entry_count"}
 	for _, kind := range kinds {
 		n := 0
 		if counts != nil {

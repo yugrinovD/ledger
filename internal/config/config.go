@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"strconv"
@@ -165,9 +166,17 @@ func (c Config) validate() error {
 		return fmt.Errorf("LEDGER_IDEMPOTENCY_TTL must be positive")
 	case c.ReconciliationStatementTimeout <= 0:
 		return fmt.Errorf("LEDGER_RECONCILIATION_STATEMENT_TIMEOUT must be positive")
+	case c.OutboxPollInterval <= 0:
+		return fmt.Errorf("LEDGER_OUTBOX_POLL_INTERVAL must be positive")
+	case c.ReconciliationInterval <= 0:
+		return fmt.Errorf("LEDGER_RECONCILIATION_INTERVAL must be positive")
+	case c.HoldSweepInterval <= 0:
+		return fmt.Errorf("LEDGER_HOLD_SWEEP_INTERVAL must be positive")
+	case c.ShutdownTimeout <= 0:
+		return fmt.Errorf("LEDGER_SHUTDOWN_TIMEOUT must be positive")
 	case c.OutboxRetention <= 0 || c.ProcessedEventsRetention <= 0 || c.AuditRetention <= 0 || c.ReconciliationRetention <= 0:
 		return fmt.Errorf("retention durations must be positive")
-	case c.TraceRatio < 0 || c.TraceRatio > 1:
+	case math.IsNaN(c.TraceRatio) || c.TraceRatio < 0 || c.TraceRatio > 1:
 		return fmt.Errorf("LEDGER_TRACE_RATIO must be between 0 and 1")
 	}
 	if c.IsProduction() {

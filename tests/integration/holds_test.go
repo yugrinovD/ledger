@@ -36,6 +36,56 @@ func TestHoldExpiryReleasesReservedFunds(t *testing.T) {
 	}
 }
 
+func TestCaptureFromFrozenAccountIsRejected(t *testing.T) {
+	_, _, svc := setup(t)
+	system := createAccount(t, svc, "system", "system-equity", "USD", "equity", true)
+	alice := createAccount(t, svc, "alice", "alice-wallet", "USD", "liability", false)
+	merchant := createAccount(t, svc, "merchant", "merchant-wallet", "USD", "liability", false)
+	fund(t, svc, system.ID, alice.ID, "100.00", "USD")
+
+	hold, _, err := svc.CreateHold(context.Background(), usecase.CreateHoldInput{
+		OwnerID: "alice", IdempotencyKey: "frozen-capture-hold", AccountID: mustParse(t, alice.ID),
+		Amount: "30.00", Currency: "USD",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.FreezeAccount(context.Background(), mustParse(t, alice.ID)); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = svc.CaptureHold(context.Background(), usecase.CaptureHoldInput{
+		OwnerID: "alice", IdempotencyKey: "frozen-capture", HoldID: mustParse(t, hold.ID),
+		DestinationAccountID: mustParse(t, merchant.ID),
+	})
+	if !domain.IsCode(err, domain.CodeAccountNotActive) {
+		t.Fatalf("capture from frozen account = %v, want account_not_active", err)
+	}
+	if got := balance(t, svc, "alice", alice.ID); got.Held != "30.00" || got.Balance != "100.00" {
+		t.Fatalf("unexpected balance after rejected capture: %+v", got)
+	}
+	if _, _, err := svc.ReleaseHold(context.Background(), usecase.ReleaseHoldInput{
+		OwnerID: "alice", IdempotencyKey: "frozen-release", HoldID: mustParse(t, hold.ID),
+	}); err != nil {
+		t.Fatalf("release on frozen account must be allowed: %v", err)
+	}
+}
+
+func TestCloseAccountWithActiveHoldIsRejected(t *testing.T) {
+	_, _, svc := setup(t)
+	system := createAccount(t, svc, "system", "system-equity", "USD", "equity", true)
+	alice := createAccount(t, svc, "alice", "alice-wallet", "USD", "liability", false)
+	fund(t, svc, system.ID, alice.ID, "100.00", "USD")
+	if _, _, err := svc.CreateHold(context.Background(), usecase.CreateHoldInput{
+		OwnerID: "alice", IdempotencyKey: "close-with-hold", AccountID: mustParse(t, alice.ID),
+		Amount: "30.00", Currency: "USD",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.CloseAccount(context.Background(), mustParse(t, alice.ID)); !domain.IsCode(err, domain.CodeConflict) {
+		t.Fatalf("close with active hold = %v, want conflict", err)
+	}
+}
+
 func TestCaptureAndExpireAreMutuallyExclusive(t *testing.T) {
 	_, _, svc := setup(t)
 	system := createAccount(t, svc, "system", "system-equity", "USD", "equity", true)

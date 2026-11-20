@@ -70,20 +70,6 @@ func (s *Store) LockAccount(ctx context.Context, tx pgx.Tx, id uuid.UUID) (domai
 	return a, b, err
 }
 
-func (s *Store) GetBalance(ctx context.Context, id uuid.UUID) (domain.Balance, error) {
-	row := s.pool.QueryRow(ctx, `
-		SELECT account_id, balance_minor, held_minor, version, updated_at
-		FROM account_balances WHERE account_id = $1`, id)
-	var b domain.Balance
-	if err := row.Scan(&b.AccountID, &b.Balance, &b.Held, &b.Version, &b.UpdatedAt); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return domain.Balance{}, domain.NotFound("balance for account %s", id)
-		}
-		return domain.Balance{}, err
-	}
-	return b, nil
-}
-
 func (s *Store) UpdateBalance(ctx context.Context, tx pgx.Tx, b domain.Balance) error {
 	tag, err := tx.Exec(ctx, `
 		UPDATE account_balances

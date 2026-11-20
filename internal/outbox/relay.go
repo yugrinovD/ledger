@@ -3,6 +3,7 @@ package outbox
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -27,7 +28,9 @@ type RelayStore interface {
 	PollOutbox(ctx context.Context, q db.Querier, limit int) ([]Event, error)
 	MarkOutboxPublishedBatch(ctx context.Context, q db.Querier, ids []int64) error
 	MarkOutboxFailed(ctx context.Context, q db.Querier, id int64, reason string, nextAttempt time.Duration) error
+	MarkOutboxParked(ctx context.Context, q db.Querier, id int64, reason string) error
 	OutboxStats(ctx context.Context, q db.Querier) (int64, float64, error)
+	OutboxParkedCount(ctx context.Context, q db.Querier) (int64, error)
 }
 
 type Relay struct {
@@ -72,7 +75,7 @@ func (r *Relay) Run(ctx context.Context) error {
 			return err
 		}
 		var locked bool
-		if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock(hashtext('ledger_outbox_relay'))`).Scan(&locked); err != nil {
+		if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, db.OutboxRelayLockKey).Scan(&locked); err != nil {
 			conn.Release()
 			return err
 		}
@@ -88,7 +91,7 @@ func (r *Relay) Run(ctx context.Context) error {
 		r.logger.Info("outbox relay acquired leadership")
 		err = r.runLeadership(ctx, conn)
 		unlockCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		_, _ = conn.Exec(unlockCtx, `SELECT pg_advisory_unlock(hashtext('ledger_outbox_relay'))`)
+		_, _ = conn.Exec(unlockCtx, `SELECT pg_advisory_unlock($1)`, db.OutboxRelayLockKey)
 		cancel()
 		conn.Release()
 		if ctx.Err() != nil {
@@ -127,6 +130,9 @@ func (r *Relay) RelayOnce(ctx context.Context, conn *pgxpool.Conn) (int, error) 
 		r.metrics.OutboxPending.Set(float64(pending))
 		r.metrics.OutboxOldestAge.Set(oldest)
 	}
+	if parked, err := r.store.OutboxParkedCount(ctx, conn); err == nil {
+		r.metrics.OutboxParked.Set(float64(parked))
+	}
 	events, err := r.store.PollOutbox(ctx, conn, r.batchSize)
 	if err != nil {
 		return 0, err
@@ -142,14 +148,20 @@ func (r *Relay) RelayOnce(ctx context.Context, conn *pgxpool.Conn) (int, error) 
 	}
 	if err := r.publisher.PublishBatch(ctx, r.topic, messages); err != nil {
 		r.metrics.OutboxFailures.Add(float64(len(events)))
+		reason := truncate(err.Error(), 1000)
 		for _, e := range events {
-			backoff := r.backoff(e.Attempts)
-			if markErr := r.store.MarkOutboxFailed(ctx, conn, e.ID, truncate(err.Error(), 1000), backoff); markErr != nil {
-				r.logger.Error("mark outbox failure", "event_id", e.EventID.String(), "err", markErr)
-			}
 			if e.Attempts+1 >= r.maxAttempts {
-				r.logger.Error("outbox event exceeded retry budget; keeping it pending with capped backoff",
+				if markErr := r.store.MarkOutboxParked(ctx, conn, e.ID, reason); markErr != nil {
+					r.logger.Error("park outbox event", "event_id", e.EventID.String(), "err", markErr)
+				}
+				r.metrics.OutboxParked.Inc()
+				r.logger.Error("outbox event parked after exceeding retry budget",
 					"event_id", e.EventID.String(), "attempts", e.Attempts+1, "err", err)
+				continue
+			}
+			backoff := r.backoff(e.Attempts)
+			if markErr := r.store.MarkOutboxFailed(ctx, conn, e.ID, reason, backoff); markErr != nil {
+				r.logger.Error("mark outbox failure", "event_id", e.EventID.String(), "err", markErr)
 			}
 		}
 		r.logger.Warn("outbox batch publish failed", "count", len(events), "err", err)
@@ -187,7 +199,10 @@ func sleep(ctx context.Context, d time.Duration) bool {
 
 func truncate(s string, n int) string {
 	if len(s) <= n {
-		return s
+		return strings.ToValidUTF8(s, "")
 	}
-	return s[:n] + "..."
+	if n <= 0 {
+		return ""
+	}
+	return strings.ToValidUTF8(s[:n], "") + "..."
 }

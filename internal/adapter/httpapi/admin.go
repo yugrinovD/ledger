@@ -28,6 +28,8 @@ func NewAdminHandler(base http.Handler, svc *usecase.Service, token string, logg
 	mux.Handle("POST /admin/accounts/{accountID}/unfreeze", adminAuth(token, logger, http.HandlerFunc(h.UnfreezeAccount)))
 	mux.Handle("POST /admin/accounts/{accountID}/close", adminAuth(token, logger, http.HandlerFunc(h.CloseAccount)))
 	mux.Handle("POST /admin/api-keys/{keyID}/revoke", adminAuth(token, logger, http.HandlerFunc(h.RevokeAPIKey)))
+	mux.Handle("GET /admin/outbox/parked", adminAuth(token, logger, http.HandlerFunc(h.ListParkedOutbox)))
+	mux.Handle("POST /admin/outbox/{eventID}/requeue", adminAuth(token, logger, http.HandlerFunc(h.RequeueOutbox)))
 	mux.Handle("/", base)
 	return mux
 }

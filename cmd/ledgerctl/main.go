@@ -173,7 +173,10 @@ func apiKeyCmd() *cobra.Command {
 				return err
 			}
 			scopeList := splitScopes(scopes)
-			id, _ := uuid.NewV7()
+			id, err := uuid.NewV7()
+			if err != nil {
+				return err
+			}
 			if err := app.store.InsertAPIKey(cmd.Context(), id, owner, name, prefix, hash, scopeList); err != nil {
 				return err
 			}
@@ -505,10 +508,50 @@ func outboxCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printJSON(map[string]any{"pending": pending, "oldest_age_seconds": oldest})
+			parked, err := app.store.OutboxParkedCount(cmd.Context(), app.store.Pool())
+			if err != nil {
+				return err
+			}
+			return printJSON(map[string]any{"pending": pending, "parked": parked, "oldest_age_seconds": oldest})
 		},
 	}
-	cmd.AddCommand(status)
+	var parkedLimit int
+	parked := &cobra.Command{
+		Use:   "ls-parked",
+		Short: "List parked outbox events",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp()
+			if err != nil {
+				return err
+			}
+			defer app.Close()
+			events, err := app.svc.ListParkedOutbox(cmd.Context(), parkedLimit)
+			if err != nil {
+				return err
+			}
+			return printJSON(map[string]any{"events": events})
+		},
+	}
+	parked.Flags().IntVar(&parkedLimit, "limit", 20, "maximum number of events")
+	var requeueID int64
+	requeue := &cobra.Command{
+		Use:   "requeue",
+		Short: "Requeue a parked outbox event",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp()
+			if err != nil {
+				return err
+			}
+			defer app.Close()
+			if err := app.svc.RequeueOutbox(cmd.Context(), requeueID); err != nil {
+				return err
+			}
+			return printJSON(map[string]any{"requeued": true, "id": requeueID})
+		},
+	}
+	requeue.Flags().Int64Var(&requeueID, "id", 0, "outbox event id")
+	_ = requeue.MarkFlagRequired("id")
+	cmd.AddCommand(status, parked, requeue)
 	return cmd
 }
 

@@ -153,7 +153,12 @@ func probe(store *postgres.Store, producer *kafka.Producer) func(context.Context
 	}
 }
 
-func runHoldSweeper(ctx context.Context, svc *usecase.Service, logger *slog.Logger, interval time.Duration) error {
+type holdExpirer interface {
+	ListExpiredHoldIDs(ctx context.Context, limit int) ([]uuid.UUID, error)
+	ExpireHold(ctx context.Context, id uuid.UUID) (bool, error)
+}
+
+func runHoldSweeper(ctx context.Context, svc holdExpirer, logger *slog.Logger, interval time.Duration) error {
 	if interval <= 0 {
 		return nil
 	}

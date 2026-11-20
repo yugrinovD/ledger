@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -26,9 +27,10 @@ func NewHandlers(svc *usecase.Service) *Handlers { return &Handlers{svc: svc} }
 
 func (h *Handlers) CreateAccount(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name     string `json:"name"`
-		Currency string `json:"currency"`
-		Type     string `json:"type"`
+		Name          string `json:"name"`
+		Currency      string `json:"currency"`
+		Type          string `json:"type"`
+		AllowNegative bool   `json:"allow_negative"`
 	}
 	if err := decodeJSON(w, r, &req); err != nil {
 		writeProblem(w, r, h.logger(), err)
@@ -37,7 +39,7 @@ func (h *Handlers) CreateAccount(w http.ResponseWriter, r *http.Request) {
 	p := mustPrincipal(r)
 	view, replayed, err := h.svc.CreateAccount(r.Context(), usecase.CreateAccountInput{
 		OwnerID: p.OwnerID, IdempotencyKey: r.Header.Get(idempotencyHeader),
-		Name: req.Name, Currency: req.Currency, Type: req.Type,
+		Name: req.Name, Currency: req.Currency, Type: req.Type, AllowNegative: req.AllowNegative,
 	})
 	if err != nil {
 		writeProblem(w, r, h.logger(), err)
@@ -294,6 +296,65 @@ func (h *Handlers) accountStatusAction(w http.ResponseWriter, r *http.Request, a
 		return
 	}
 	writeJSON(w, http.StatusOK, view)
+}
+
+type parkedOutboxView struct {
+	ID            int64             `json:"id"`
+	EventID       string            `json:"event_id"`
+	AggregateType string            `json:"aggregate_type"`
+	AggregateID   string            `json:"aggregate_id"`
+	Type          string            `json:"type"`
+	Payload       json.RawMessage   `json:"payload"`
+	Headers       map[string]string `json:"headers,omitempty"`
+	Attempts      int               `json:"attempts"`
+	LastError     string            `json:"last_error,omitempty"`
+	CreatedAt     time.Time         `json:"created_at"`
+	AvailableAt   time.Time         `json:"available_at"`
+	ParkedAt      *time.Time        `json:"parked_at,omitempty"`
+}
+
+func (h *Handlers) ListParkedOutbox(w http.ResponseWriter, r *http.Request) {
+	limit := 20
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 || n > 100 {
+			writeProblem(w, r, h.logger(), domain.Validation("limit must be between 1 and 100"))
+			return
+		}
+		limit = n
+	}
+	events, err := h.svc.ListParkedOutbox(r.Context(), limit)
+	if err != nil {
+		writeProblem(w, r, h.logger(), err)
+		return
+	}
+	out := make([]parkedOutboxView, 0, len(events))
+	for _, e := range events {
+		out = append(out, parkedOutboxView{
+			ID: e.ID, EventID: e.EventID.String(), AggregateType: e.AggregateType,
+			AggregateID: e.AggregateID.String(), Type: e.Type, Payload: e.Payload,
+			Headers: e.Headers, Attempts: e.Attempts, LastError: e.LastError,
+			CreatedAt: e.CreatedAt.UTC(), AvailableAt: e.AvailableAt.UTC(), ParkedAt: e.ParkedAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"events": out})
+}
+
+func (h *Handlers) RequeueOutbox(w http.ResponseWriter, r *http.Request) {
+	raw := chi.URLParam(r, "eventID")
+	if raw == "" {
+		raw = r.PathValue("eventID")
+	}
+	id, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || id <= 0 {
+		writeProblem(w, r, h.logger(), domain.Validation("invalid event_id"))
+		return
+	}
+	if err := h.svc.RequeueOutbox(r.Context(), id); err != nil {
+		writeProblem(w, r, h.logger(), err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"requeued": true})
 }
 
 func (h *Handlers) RevokeAPIKey(w http.ResponseWriter, r *http.Request) {

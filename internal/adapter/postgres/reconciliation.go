@@ -31,19 +31,37 @@ func (s *Store) FinishReconciliationRun(ctx context.Context, r reconciliation.Ru
 }
 
 func (s *Store) InsertDiscrepancies(ctx context.Context, runID uuid.UUID, items []reconciliation.Discrepancy) error {
+	if len(items) == 0 {
+		return nil
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	batch := &pgx.Batch{}
 	for _, d := range items {
 		details := d.Details
 		if details == nil {
 			details = map[string]any{}
 		}
-		if _, err := s.pool.Exec(ctx, `
+		batch.Queue(`
 			INSERT INTO reconciliation_discrepancies (run_id, kind, account_id, transaction_id, expected, actual, details)
 			VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-			runID, d.Kind, d.AccountID, d.TransactionID, d.Expected, d.Actual, details); err != nil {
+			runID, d.Kind, d.AccountID, d.TransactionID, d.Expected, d.Actual, details)
+	}
+	results := tx.SendBatch(ctx, batch)
+	for range items {
+		if _, err := results.Exec(); err != nil {
+			_ = results.Close()
 			return err
 		}
 	}
-	return nil
+	if err := results.Close(); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *Store) GetReconciliationRun(ctx context.Context, id uuid.UUID) (reconciliation.Run, error) {
@@ -209,6 +227,76 @@ func (s *Store) FindUnbalancedTransactions(ctx context.Context, q Querier) ([]re
 		d.Expected = new(int64)
 		d.Actual = &delta
 		d.Details = map[string]any{"currency": currency}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) FindEmptyTransactions(ctx context.Context, q Querier) ([]reconciliation.Discrepancy, error) {
+	rows, err := q.Query(ctx, `
+		SELECT t.id
+		FROM journal_transactions t
+		LEFT JOIN journal_entries e ON e.transaction_id = t.id
+		GROUP BY t.id
+		HAVING count(e.id) = 0
+		ORDER BY t.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []reconciliation.Discrepancy
+	for rows.Next() {
+		var d reconciliation.Discrepancy
+		var txID uuid.UUID
+		if err := rows.Scan(&txID); err != nil {
+			return nil, err
+		}
+		d.Kind = "empty_transaction"
+		d.TransactionID = &txID
+		expected := int64(1)
+		actual := int64(0)
+		d.Expected = &expected
+		d.Actual = &actual
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) FindHoldCaptureAnomalies(ctx context.Context, q Querier) ([]reconciliation.Discrepancy, error) {
+	rows, err := q.Query(ctx, `
+		SELECT h.id, COALESCE(h.captured_transaction_id::text, ''), count(e.id)
+		FROM holds h
+		LEFT JOIN journal_transactions t ON t.id = h.captured_transaction_id
+		LEFT JOIN journal_entries e ON e.transaction_id = t.id
+		WHERE h.status = 'captured'
+		GROUP BY h.id, h.captured_transaction_id
+		HAVING h.captured_transaction_id IS NULL OR count(e.id) <> 2
+		ORDER BY h.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []reconciliation.Discrepancy
+	for rows.Next() {
+		var d reconciliation.Discrepancy
+		var holdID uuid.UUID
+		var capturedRaw string
+		var count int64
+		if err := rows.Scan(&holdID, &capturedRaw, &count); err != nil {
+			return nil, err
+		}
+		d.Kind = "hold_capture"
+		if capturedRaw != "" {
+			txID, err := uuid.Parse(capturedRaw)
+			if err != nil {
+				return nil, err
+			}
+			d.TransactionID = &txID
+		}
+		expected := int64(2)
+		d.Expected = &expected
+		d.Actual = &count
+		d.Details = map[string]any{"hold_id": holdID.String()}
 		out = append(out, d)
 	}
 	return out, rows.Err()

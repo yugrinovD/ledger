@@ -55,3 +55,25 @@ func TestAllowNegativeCurrencyMismatchAndClosedAccounts(t *testing.T) {
 		t.Fatalf("transfer to closed account = %v", err)
 	}
 }
+
+func TestCrossTenantDestinationIsAllowed(t *testing.T) {
+	_, _, svc := setup(t)
+	system := createAccount(t, svc, "system", "system-equity", "USD", "equity", true)
+	alice := createAccount(t, svc, "alice", "alice-wallet", "USD", "liability", false)
+	bob := createAccount(t, svc, "bob", "bob-wallet", "USD", "liability", false)
+	fund(t, svc, system.ID, alice.ID, "10.00", "USD")
+
+	if _, _, err := svc.CreateTransfer(context.Background(), usecase.CreateTransferInput{
+		OwnerID: "alice", IdempotencyKey: "cross-tenant",
+		SourceAccountID: mustParse(t, alice.ID), DestinationAccountID: mustParse(t, bob.ID),
+		Amount: "2.00", Currency: "USD",
+	}); err != nil {
+		t.Fatalf("cross-tenant destination rejected: %v", err)
+	}
+	if got := balance(t, svc, "bob", bob.ID).Balance; got != "2.00" {
+		t.Fatalf("bob balance = %s, want 2.00", got)
+	}
+	if got := balance(t, svc, "alice", alice.ID).Balance; got != "8.00" {
+		t.Fatalf("alice balance = %s, want 8.00", got)
+	}
+}
