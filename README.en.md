@@ -6,6 +6,13 @@ Idempotent double-entry payment ledger built with **Go, PostgreSQL, Redpanda
 The full documentation is in [README.md](README.md) (Russian). This page is a
 short English overview for reviewers.
 
+**Part of [AI Ops Stack](https://github.com/yugrinovD/ai-ops-stack):**
+[gogate](https://github.com/yugrinovD/gogate) ·
+[lmlog](https://github.com/yugrinovD/lmlog) ·
+[ops-console](https://github.com/yugrinovD/ops-console) ·
+[ledger](https://github.com/yugrinovD/ledger) ·
+[ai-ops-stack](https://github.com/yugrinovD/ai-ops-stack).
+
 ## What it demonstrates
 
 - Immutable double-entry journal; every transaction balances per currency and is

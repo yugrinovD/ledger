@@ -11,6 +11,13 @@ Go + PostgreSQL + Redpanda (Kafka API) + Redis + Docker + Prometheus/Grafana + J
 
 [English summary](README.en.md) · [ADRs](docs/adr) · [Benchmarks](docs/benchmarks) · [OpenAPI](api/openapi.yaml) · [Admin OpenAPI](api/admin.openapi.yaml)
 
+**Part of [AI Ops Stack](https://github.com/yugrinovD/ai-ops-stack):**
+[gogate](https://github.com/yugrinovD/gogate) ·
+[lmlog](https://github.com/yugrinovD/lmlog) ·
+[ops-console](https://github.com/yugrinovD/ops-console) ·
+[ledger](https://github.com/yugrinovD/ledger) ·
+[ai-ops-stack](https://github.com/yugrinovD/ai-ops-stack).
+
 ---
 
 ## Что это
