@@ -5,11 +5,12 @@
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17-4169E1?logo=postgresql)
 ![Kafka](https://img.shields.io/badge/Redpanda-Kafka%20API-EE2B29)
 ![License](https://img.shields.io/badge/license-MIT-green)
+[![Release](https://img.shields.io/github/v/release/yugrinovd/ledger?sort=semver)](https://github.com/yugrinovd/ledger/releases)
 
 **Идемпотентный double-entry ledger с outbox, reconciliation и наблюдаемостью.**
 Go + PostgreSQL + Redpanda (Kafka API) + Redis + Docker + Prometheus/Grafana + Jaeger + k6.
 
-[English summary](README.en.md) · [ADRs](docs/adr) · [Benchmarks](docs/benchmarks) · [OpenAPI](api/openapi.yaml) · [Admin OpenAPI](api/admin.openapi.yaml)
+[English summary](README.en.md) · [Changelog](CHANGELOG.md) · [ADRs](docs/adr) · [Benchmarks](docs/benchmarks) · [OpenAPI](api/openapi.yaml) · [Admin OpenAPI](api/admin.openapi.yaml)
 
 **Part of [AI Ops Stack](https://github.com/yugrinovD/ai-ops-stack):**
 [gogate](https://github.com/yugrinovD/gogate) ·
